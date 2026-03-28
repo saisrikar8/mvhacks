@@ -142,6 +142,38 @@
       box-shadow: 0 1px 2px rgba(0,0,0,0.1);
       pointer-events: none;
     }
+    #ocean-controls {
+      position: fixed;
+      bottom: 130px;
+      left: 16px;
+      z-index: 12;
+      background: rgba(255,255,255,0.96);
+      color: #3c4043;
+      padding: 10px 14px;
+      border-radius: 8px;
+      box-shadow: 0 1px 2px 0 rgba(60,64,67,0.302), 0 1px 3px 1px rgba(60,64,67,0.149);
+      font-family: 'Google Sans', Roboto, Arial, sans-serif;
+      font-size: 12px;
+      line-height: 1.5;
+      max-width: min(280px, 92vw);
+    }
+    #ocean-controls .oc-title {
+      font-size: 10px;
+      font-weight: 600;
+      color: #70757a;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }
+    #ocean-controls label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      margin-bottom: 4px;
+    }
+    #ocean-controls label:last-child { margin-bottom: 0; }
+    #ocean-controls input { accent-color: #0d9488; }
   </style>
 </head>
 <body>
@@ -152,6 +184,12 @@
   <button type="button" id="btn-clear">Clear all</button>
 </div>
 <p id="route-hint">Click the map to add start → waypoints → end. Then Compute route.</p>
+
+<div id="ocean-controls">
+  <div class="oc-title">Under the sea</div>
+  <label><input type="checkbox" id="toggle-bathymetry" checked> Bathymetry overlay (Mapbox v2)</label>
+  <label><input type="checkbox" id="toggle-shallow-penalty"> Shallow-water routing penalty</label>
+</div>
 
 <div id="loader">
   <div class="spinner"></div>
@@ -165,6 +203,8 @@
   <div class="legend-item"><div class="legend-circle">F</div> <span>Strong Wind (>10m/s)</span></div>
   <div class="legend-item"><div class="legend-circle">C</div> <span>Strong Current (>0.5m/s)</span></div>
   <div class="legend-item"><div class="legend-circle" style="background: #dadce0; border-radius: 2px; width: 10px; height: 10px;"></div> <span>Moderate Conditions</span></div>
+  <div class="legend-item"><div class="legend-circle" style="background: linear-gradient(90deg,#bae6fd,#0369a1); border-radius: 2px; width: 18px; height: 10px;"></div> <span>Bathymetry (deeper = darker)</span></div>
+  <div class="legend-item"><div class="legend-circle" style="background: #fed7aa; border-color: #ea580c;">S</div> <span>Shallow shelf (Tilequery / min_depth)</span></div>
 </div>
 <div id="map"></div>
 
