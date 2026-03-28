@@ -1,13 +1,173 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>ocean-map-app</title>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.jsx"></script>
-  </body>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OceanRoute MVP</title>
+  <link href="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css" rel="stylesheet">
+  <style>
+    body { margin: 0; padding: 0; background: rgb(150, 196, 242); }
+    #map { position: absolute; top: 0; bottom: 0; width: 100%; }
+
+    /* Loading Spinner */
+    #loader {
+      display: none;
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      z-index: 999;
+      text-align: center;
+      font-family: 'Courier New', Courier, monospace;
+      color: #e0f7ff;
+      background: linear-gradient(145deg, rgba(12, 74, 110, 0.94), rgba(8, 50, 85, 0.96));
+      padding: 20px;
+      border-radius: 10px;
+      border: 1px solid rgba(56, 189, 248, 0.65);
+    }
+    .spinner {
+      border: 4px solid rgba(0,242,255,0.1);
+      border-left-color: rgba(45, 212, 191, 0.9);
+      border-radius: 50%;
+      width: 40px;
+      height: 40px;
+      animation: spin 1s linear infinite;
+      margin: 0 auto 10px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Stats Dashboard - Re-styled as Route Menu */
+    #dash {
+      position: fixed;
+      top: 16px;
+      left: 16px;
+      background: #ffffff;
+      color: #3c4043;
+      padding: 12px 0;
+      border-radius: 8px;
+      box-shadow: 0 1px 2px 0 rgba(60,64,67,0.302), 0 1px 3px 1px rgba(60,64,67,0.149);
+      font-family: 'Google Sans', Roboto, Arial, sans-serif;
+      z-index: 20;
+      display: none;
+      width: 320px;
+      max-width: 92vw;
+      font-size: 14px;
+      line-height: 1.4;
+      overflow: hidden;
+    }
+    #legend {
+      position: fixed;
+      top: 16px;
+      right: 16px;
+      background: #ffffff;
+      color: #3c4043;
+      padding: 12px 16px;
+      border-radius: 8px;
+      box-shadow: 0 1px 2px 0 rgba(60,64,67,0.302), 0 1px 3px 1px rgba(60,64,67,0.149);
+      font-family: 'Google Sans', Roboto, Arial, sans-serif;
+      z-index: 20;
+      font-size: 12px;
+      display: none;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 4px;
+    }
+    .legend-item:last-child { margin-bottom: 0; }
+    .legend-circle {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      border: 1.5px solid #70757a;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: bold;
+      font-size: 10px;
+      color: #3c4043;
+    }
+    .route-item {
+      padding: 12px 16px;
+      cursor: pointer;
+      transition: background 0.2s;
+      border-bottom: 1px solid #f1f3f4;
+    }
+    .route-item:last-child { border-bottom: none; }
+    .route-item:hover { background: #f8f9fa; }
+    .route-item.selected { background: #e8f0fe; }
+    .route-item.selected:hover { background: #d2e3fc; }
+    
+    #route-toolbar {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 10;
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      justify-content: center;
+      font-family: 'Google Sans', Roboto, Arial, sans-serif;
+    }
+    #route-toolbar button {
+      background: #ffffff;
+      color: #1a73e8;
+      border: 1px solid #dadce0;
+      padding: 10px 20px;
+      border-radius: 24px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 500;
+      box-shadow: 0 1px 3px 0 rgba(60,64,67,0.3), 0 4px 8px 3px rgba(60,64,67,0.15);
+    }
+    #route-toolbar button:hover {
+      background: #f1f3f4;
+    }
+    #route-toolbar button:disabled { opacity: 0.6; cursor: not-allowed; background: #f1f3f4; }
+    #route-hint {
+      position: fixed;
+      bottom: 80px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 10;
+      color: #3c4043;
+      font-family: 'Google Sans', Roboto, Arial, sans-serif;
+      font-size: 13px;
+      text-align: center;
+      background: rgba(255,255,255,0.9);
+      padding: 4px 12px;
+      border-radius: 12px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+
+<div id="route-toolbar">
+  <button type="button" id="btn-route" disabled>Compute route</button>
+  <button type="button" id="btn-undo">Undo point</button>
+  <button type="button" id="btn-clear">Clear all</button>
+</div>
+<p id="route-hint">Click the map to add start → waypoints → end. Then Compute route.</p>
+
+<div id="loader">
+  <div class="spinner"></div>
+  <span>WEATHER + SEA ROUTING…</span>
+</div>
+
+<div id="dash"></div>
+<div id="legend">
+  <div style="font-weight: 500; margin-bottom: 8px; font-size: 13px; color: #70757a; text-transform: uppercase; letter-spacing: 0.5px;">Hazards Key</div>
+  <div class="legend-item"><div class="legend-circle">W</div> <span>High Waves (>2.5m)</span></div>
+  <div class="legend-item"><div class="legend-circle">F</div> <span>Strong Wind (>10m/s)</span></div>
+  <div class="legend-item"><div class="legend-circle">C</div> <span>Strong Current (>0.5m/s)</span></div>
+  <div class="legend-item"><div class="legend-circle" style="background: #dadce0; border-radius: 2px; width: 10px; height: 10px;"></div> <span>Moderate Conditions</span></div>
+</div>
+<div id="map"></div>
+
+<script type="module" src="/main.js"></script>
+</body>
 </html>
