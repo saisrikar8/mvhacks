@@ -23,6 +23,12 @@ const legend = document.getElementById('legend');
 const btnRoute = document.getElementById('btn-route');
 const btnUndo = document.getElementById('btn-undo');
 const btnClear = document.getElementById('btn-clear');
+const toggleBathymetry = document.getElementById('toggle-bathymetry');
+const toggleShallowPenalty = document.getElementById('toggle-shallow-penalty');
+
+const BATHYMETRY_SOURCE_ID = 'mapbox-bathymetry-v2';
+const BATHYMETRY_LAYER_FILL = 'bathymetry-depth-fill';
+const BATHYMETRY_LAYER_SHALLOW = 'bathymetry-shallow-warn';
 
 /** @type {mapboxgl.Marker[]} */
 let routeMarkers = [];
@@ -60,6 +66,93 @@ function applyVibrantCoastalPalette() {
     }
 }
 
+function firstSymbolLayerId() {
+    const layers = map.getStyle()?.layers;
+    if (!layers) return undefined;
+    const sym = layers.find((l) => l.type === 'symbol');
+    return sym?.id;
+}
+
+function addBathymetryLayers() {
+    if (map.getSource(BATHYMETRY_SOURCE_ID)) return;
+    try {
+        map.addSource(BATHYMETRY_SOURCE_ID, {
+            type: 'vector',
+            url: 'mapbox://mapbox.mapbox-bathymetry-v2'
+        });
+    } catch (e) {
+        console.warn('Bathymetry source failed:', e);
+        return;
+    }
+    const beforeId = firstSymbolLayerId();
+    const baseLayer = {
+        id: BATHYMETRY_LAYER_FILL,
+        type: 'fill',
+        source: BATHYMETRY_SOURCE_ID,
+        'source-layer': 'depth',
+        minzoom: 0,
+        maxzoom: 22,
+        paint: {
+            'fill-color': [
+                'interpolate',
+                ['linear'],
+                ['get', 'min_depth'],
+                0,
+                'rgba(186, 230, 253, 0.42)',
+                50,
+                'rgba(125, 211, 252, 0.36)',
+                200,
+                'rgba(56, 189, 248, 0.32)',
+                1000,
+                'rgba(14, 116, 144, 0.38)',
+                4000,
+                'rgba(12, 74, 110, 0.45)',
+                9000,
+                'rgba(8, 47, 73, 0.5)'
+            ],
+            'fill-opacity': 0.72,
+            'fill-outline-color': 'rgba(255,255,255,0.06)'
+        }
+    };
+    const shallowLayer = {
+        id: BATHYMETRY_LAYER_SHALLOW,
+        type: 'fill',
+        source: BATHYMETRY_SOURCE_ID,
+        'source-layer': 'depth',
+        minzoom: 0,
+        maxzoom: 22,
+        filter: ['all', ['has', 'min_depth'], ['<=', ['get', 'min_depth'], 200]],
+        paint: {
+            'fill-color': 'rgba(251, 191, 36, 0.22)',
+            'fill-outline-color': 'rgba(234, 88, 12, 0.35)'
+        }
+    };
+    try {
+        if (beforeId) {
+            map.addLayer(baseLayer, beforeId);
+            map.addLayer(shallowLayer, beforeId);
+        } else {
+            map.addLayer(baseLayer);
+            map.addLayer(shallowLayer);
+        }
+    } catch (e) {
+        console.warn('Bathymetry layers failed:', e);
+    }
+}
+
+function setBathymetryOverlayVisible(on) {
+    for (const id of [BATHYMETRY_LAYER_FILL, BATHYMETRY_LAYER_SHALLOW]) {
+        if (!map.getLayer(id)) continue;
+        map.setLayoutProperty(id, 'visibility', on ? 'visible' : 'none');
+    }
+}
+
+if (toggleBathymetry) {
+    toggleBathymetry.addEventListener('change', () => {
+        setBathymetryOverlayVisible(!!toggleBathymetry.checked);
+    });
+}
+
 map.on('load', () => {
     applyVibrantCoastalPalette();
     map.setFog({
@@ -69,6 +162,8 @@ map.on('load', () => {
         'horizon-blend': 0.032,
         'star-intensity': 0.075
     });
+    addBathymetryLayers();
+    setBathymetryOverlayVisible(!!toggleBathymetry?.checked);
 });
 
 /** Coarse centerlines for major ship canals (Mapbox `waterway` often has minzoom 8 — these still work when zoomed out). */
@@ -90,6 +185,82 @@ const KNOWN_SHIP_CANALS = [
 function bboxOverlapsMap(bb, west, south, east, north) {
     const [minX, minY, maxX, maxY] = bb;
     return !(maxX < west || minX > east || maxY < south || minY > north);
+}
+
+/** Great-circle distance (km) for step counts along geodesics (matches globe line rendering). */
+function haversineKm(lon1, lat1, lon2, lat2) {
+    const R = 6371;
+    const r = Math.PI / 180;
+    const dLat = (lat2 - lat1) * r;
+    const dLon = (lon2 - lon1) * r;
+    const a =
+        Math.sin(dLat / 2) ** 2 +
+        Math.cos(lat1 * r) * Math.cos(lat2 * r) * Math.sin(dLon / 2) ** 2;
+    return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
+}
+
+/**
+ * Spherical linear interpolation — positions along the geodesic Mapbox draws between two lng/lats on the globe.
+ * @returns {[number, number]} [lng, lat]
+ */
+function interpolateGeodesic(lon1, lat1, lon2, lat2, t) {
+    const φ1 = lat1 * (Math.PI / 180);
+    const λ1 = lon1 * (Math.PI / 180);
+    const φ2 = lat2 * (Math.PI / 180);
+    const λ2 = lon2 * (Math.PI / 180);
+    const d =
+        2 *
+        Math.asin(
+            Math.min(
+                1,
+                Math.sqrt(
+                    Math.sin((φ2 - φ1) / 2) ** 2 +
+                        Math.cos(φ1) * Math.cos(φ2) * Math.sin((λ2 - λ1) / 2) ** 2
+                )
+            )
+        );
+    if (d < 1e-12) return [lon1, lat1];
+    const s = Math.sin(d);
+    const a = Math.sin((1 - t) * d) / s;
+    const b = Math.sin(t * d) / s;
+    const x = a * Math.cos(φ1) * Math.cos(λ1) + b * Math.cos(φ2) * Math.cos(λ2);
+    const y = a * Math.cos(φ1) * Math.sin(λ1) + b * Math.cos(φ2) * Math.sin(λ2);
+    const z = a * Math.sin(φ1) + b * Math.sin(φ2);
+    const φ = Math.atan2(z, Math.hypot(x, y));
+    const λ = Math.atan2(y, x);
+    return [(λ * 180) / Math.PI, (φ * 180) / Math.PI];
+}
+
+/** Reused for booleanPointInPolygon against Mapbox water features (avoids allocations in hot paths). */
+const navigablePipPoint = {
+    type: 'Feature',
+    properties: {},
+    geometry: { type: 'Point', coordinates: [0, 0] }
+};
+
+/**
+ * True iff (lng,lat) lies inside any navigable water polygon (oceans + canal buffers), not grid voting.
+ */
+function pointInNavigableWater(navGrid, lng, lat) {
+    const { west, south, east, north } = navGrid;
+    if (lng < west || lng > east || lat < south || lat > north) return false;
+    const b = navGrid.waterBuckets;
+    if (!b || !navGrid.waterBucketCols) return gridIsWater(navGrid, lng, lat);
+    navigablePipPoint.geometry.coordinates[0] = lng;
+    navigablePipPoint.geometry.coordinates[1] = lat;
+    const BI = navGrid.waterBucketCols;
+    const BJ = navGrid.waterBucketRows;
+    const bw = navGrid.waterBucketW;
+    const bh = navGrid.waterBucketH;
+    const ii = Math.min(BI - 1, Math.max(0, Math.floor((lng - west) / bw)));
+    const jj = Math.min(BJ - 1, Math.max(0, Math.floor((lat - south) / bh)));
+    const cand = b[ii + jj * BI];
+    for (const item of cand) {
+        const [minX, minY, maxX, maxY] = item.bb;
+        if (lng < minX || lng > maxX || lat < minY || lat > maxY) continue;
+        if (booleanPointInPolygon(navigablePipPoint, item.f)) return true;
+    }
+    return false;
 }
 
 function waitMapIdle() {
@@ -205,9 +376,9 @@ function buildNavigabilityGrid() {
         }
     }
 
-    const maxDim = 140;
-    const stepLon = Math.max(w / maxDim, 0.035);
-    const stepLat = Math.max(h / maxDim, 0.035);
+    const maxDim = 168;
+    const stepLon = Math.max(w / maxDim, 0.028);
+    const stepLat = Math.max(h / maxDim, 0.028);
     const cols = Math.max(1, Math.ceil(w / stepLon));
     const rows = Math.max(1, Math.ceil(h / stepLat));
 
@@ -242,12 +413,27 @@ function buildNavigabilityGrid() {
     }
 
     const minCell = Math.min(stepLon, stepLat);
-    const sampleSpacing = Math.min(0.016, minCell * 0.28);
+    const sampleSpacing = Math.min(0.012, minCell * 0.22);
 
     return {
-        west, south, east, north, stepLon, stepLat, cols, rows, grid, sampleSpacing,
+        west,
+        south,
+        east,
+        north,
+        stepLon,
+        stepLat,
+        cols,
+        rows,
+        grid,
+        sampleSpacing,
         /** Buffered canal polygons + same as water fills for precise click tests */
-        extraPolys
+        extraPolys,
+        /** Spatial index for exact water tests along geodesics (primary land/water gate). */
+        waterBuckets: buckets,
+        waterBucketCols: BI,
+        waterBucketRows: BJ,
+        waterBucketW: bucketW,
+        waterBucketH: bucketH
     };
 }
 
@@ -260,11 +446,14 @@ function gridIsWater(navGrid, lng, lat) {
 }
 
 /**
- * Closest navigable (water) cell center in the grid to the click — no distance cap, so inland ports
- * still snap to the nearest sea that appears in the current map bbox.
+ * Closest navigable water to the click. If the point is already inside a water polygon, keep it
+ * (exact hit). Otherwise snap to the nearest cell marked water in the search grid.
  */
 function nearestNavigableFromGrid(lng, lat, navGrid) {
-    if (gridIsWater(navGrid, lng, lat)) {
+    if (navGrid.waterBuckets && pointInNavigableWater(navGrid, lng, lat)) {
+        return { lng, lat };
+    }
+    if (!navGrid.waterBuckets && gridIsWater(navGrid, lng, lat)) {
         return { lng, lat };
     }
     const { west, south, stepLon, stepLat, cols, rows, grid } = navGrid;
@@ -285,22 +474,34 @@ function nearestNavigableFromGrid(lng, lat, navGrid) {
     return best;
 }
 
-function mergeShoreConnectorLegs(userStart, userEnd, seaPathCoords) {
+/**
+ * Build the displayed path on water only. Shore connectors (pin → first sea node) are added only
+ * if the geodesic stays in water; otherwise the line starts/ends at open water so it never crosses land.
+ */
+function mergeShoreConnectorLegs(navGrid, userStart, userEnd, seaPathCoords) {
     if (seaPathCoords.length === 0) return [];
     const eps = 1e-5;
     const out = [];
     const u0 = { lng: userStart.lng, lat: userStart.lat };
+    const u1 = { lng: userEnd.lng, lat: userEnd.lat };
     const firstSea = { lng: seaPathCoords[0][0], lat: seaPathCoords[0][1] };
+    const lastSea = {
+        lng: seaPathCoords[seaPathCoords.length - 1][0],
+        lat: seaPathCoords[seaPathCoords.length - 1][1]
+    };
+
     if (dist(u0, firstSea) > eps) {
-        out.push([userStart.lng, userStart.lat]);
+        if (segmentNavigableStrict(navGrid, u0.lng, u0.lat, firstSea.lng, firstSea.lat)) {
+            out.push([u0.lng, u0.lat]);
+        }
     }
     for (const c of seaPathCoords) {
         out.push(c);
     }
-    const lastSea = { lng: seaPathCoords[seaPathCoords.length - 1][0], lat: seaPathCoords[seaPathCoords.length - 1][1] };
-    const u1 = { lng: userEnd.lng, lat: userEnd.lat };
     if (dist(u1, lastSea) > eps) {
-        out.push([userEnd.lng, userEnd.lat]);
+        if (segmentNavigableStrict(navGrid, lastSea.lng, lastSea.lat, u1.lng, u1.lat)) {
+            out.push([u1.lng, u1.lat]);
+        }
     }
     return out;
 }
@@ -318,11 +519,50 @@ function edgeBearingDeg(lng1, lat1, lng2, lat2) {
     return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
 }
 
+/** Smallest `min_depth` from Tilequery (Mapbox Bathymetry v2); large sentinel if unknown. */
+async function tilequeryMinDepth(lng, lat) {
+    if (!MB_TOKEN) return { minDepthM: 1e6 };
+    const url =
+        `https://api.mapbox.com/v4/mapbox.mapbox-bathymetry-v2/tilequery/` +
+        `${encodeURIComponent(lng)},${encodeURIComponent(lat)}.json?access_token=${encodeURIComponent(MB_TOKEN)}&limit=10`;
+    try {
+        const r = await fetch(url);
+        if (!r.ok) return { minDepthM: 1e6 };
+        const j = await r.json();
+        const feats = j.features || [];
+        let m = 1e9;
+        for (const f of feats) {
+            const v = f.properties?.min_depth;
+            if (typeof v === 'number' && !Number.isNaN(v)) m = Math.min(m, v);
+        }
+        return { minDepthM: m >= 1e8 ? 1e6 : m };
+    } catch {
+        return { minDepthM: 1e6 };
+    }
+}
+
+async function runPool(tasks, concurrency) {
+    const results = new Array(tasks.length);
+    let i = 0;
+    async function worker() {
+        for (;;) {
+            const k = i++;
+            if (k >= tasks.length) return;
+            results[k] = await tasks[k]();
+        }
+    }
+    const n = Math.min(concurrency, Math.max(1, tasks.length));
+    await Promise.all(Array.from({ length: n }, () => worker()));
+    return results;
+}
+
 /**
  * Bilinear sample of marine + wind fields over the search area (Open-Meteo batched).
+ * Optional Mapbox bathymetry Tilequery grid for shallow-water routing (same cell layout).
  * @returns {Promise<null | object>}
  */
-async function buildHazardFieldForNavGrid(navGrid) {
+async function buildHazardFieldForNavGrid(navGrid, opts = {}) {
+    const includeBathymetrySamples = !!opts.includeBathymetrySamples;
     const { west, south, east, north } = navGrid;
     let w = east - west;
     if (w < 0) w += 360;
@@ -365,9 +605,20 @@ async function buildHazardFieldForNavGrid(navGrid) {
             windMs[k] = Number(wc.current?.wind_speed_10m) || 0;
             windFromDeg[k] = Number(wc.current?.wind_direction_10m) || 0;
         }
-        return {
+        const out = {
             west, south, east, north, cols, rows, wave, curSpd, curDirDeg, windMs, windFromDeg
         };
+        if (includeBathymetrySamples) {
+            const minDepth = new Float32Array(n);
+            minDepth.fill(1e6);
+            const tasks = lats.map((lat, k) => async () => {
+                const r = await tilequeryMinDepth(lngs[k], lat);
+                minDepth[k] = r.minDepthM;
+            });
+            await runPool(tasks, 24);
+            out.minDepth = minDepth;
+        }
+        return out;
     } catch {
         return null;
     }
@@ -424,11 +675,60 @@ function sampleHazardAt(hf, lng, lat) {
 }
 
 /**
- * >1 = higher cost (avoid): waves, cross / head currents, head / cross wind, rough-sea debris proxy.
- * mode: 'distance' | 'safety' | 'time'
+ * Bilinear sample of bathymetry `min_depth` grid (meters). Returns large value if absent.
+ */
+function sampleMinDepthAt(hf, lng, lat) {
+    if (!hf?.minDepth) return 1e6;
+    let bw = hf.east - hf.west;
+    if (bw < 0) bw += 360;
+    const bh = hf.north - hf.south;
+    let fx = ((lng - hf.west) / bw) * hf.cols - 0.5;
+    let fy = ((lat - hf.south) / bh) * hf.rows - 0.5;
+    fx = Math.max(0, Math.min(hf.cols - 1.001, fx));
+    fy = Math.max(0, Math.min(hf.rows - 1.001, fy));
+    const i0 = Math.floor(fx);
+    const j0 = Math.floor(fy);
+    const i1 = Math.min(hf.cols - 1, i0 + 1);
+    const j1 = Math.min(hf.rows - 1, j0 + 1);
+    const tx = fx - i0;
+    const ty = fy - j0;
+    const idx = (ii, jj) => jj * hf.cols + ii;
+    const arr = hf.minDepth;
+    const lerp = (a, b, t) => a + (b - a) * t;
+    const v00 = arr[idx(i0, j0)];
+    const v10 = arr[idx(i1, j0)];
+    const v01 = arr[idx(i0, j1)];
+    const v11 = arr[idx(i1, j1)];
+    return lerp(lerp(v00, v10, tx), lerp(v01, v11, tx), ty);
+}
+
+/**
+ * Mapbox docs: inside a depth polygon, true depth is less than `min_depth` (meters).
+ * Smaller `min_depth` ⇒ shallower ceiling ⇒ higher routing penalty when enabled.
+ */
+function shallowWaterCostTerm(minDepthM) {
+    if (minDepthM >= 1e5 || minDepthM > 600) return 0;
+    const cap = 320;
+    const t = Math.max(0, (cap - minDepthM) / cap);
+    const shelf = minDepthM < 90 ? 0.45 : 0;
+    return 0.55 * t * t + shelf;
+}
+
+/**
+ * Per-edge cost multipliers for A*. Intentionally different objectives:
+ * - `distance` (fastest): ignore marine data — uniform cost → shortest geographic path.
+ * - `safety` (safest): cost dominated by sea state (waves emphasized); distance is not the goal.
+ * - `time` (balanced): blend of baseline distance-like cost and sea state.
+ * When the hazard field is null or nearly uniform, fastest vs balanced can coincide (same topology).
  */
 function edgeSafetyMultiplier(hazardField, lng1, lat1, lng2, lat2, mode = 'safety') {
-    if (!hazardField) return 1;
+    if (mode === 'distance') {
+        return 1;
+    }
+    if (!hazardField) {
+        return 1;
+    }
+
     const mlng = (lng1 + lng2) / 2;
     const mlat = (lat1 + lat2) / 2;
     const s = sampleHazardAt(hazardField, mlng, mlat);
@@ -445,66 +745,102 @@ function edgeSafetyMultiplier(hazardField, lng1, lat1, lng2, lat2, mode = 'safet
     const waveTerm = 0.22 * s.wave * s.wave + 0.08 * s.wave;
     const debrisProxy = 0.12 * Math.min(1, s.wave / 3.5) * Math.min(1, s.windMs / 14);
 
-    let weight = 1.0;
-    if (mode === 'distance') {
-        weight = 1.0 + (waveTerm + curTerm + windTerm + debrisProxy) * 0.15; // 15% influence
-    } else if (mode === 'time') {
-        weight = 1.0 + (waveTerm + curTerm + windTerm + debrisProxy) * 0.55; // 55% influence
-    } else {
-        weight = 1.0 + (waveTerm + curTerm + windTerm + debrisProxy); // 100% influence (safety mode)
+    const md = sampleMinDepthAt(hazardField, mlng, mlat);
+    const depthTerm = hazardField.minDepth ? shallowWaterCostTerm(md) : 0;
+
+    const marineExposure = waveTerm + curTerm + windTerm + debrisProxy;
+
+    if (mode === 'safety') {
+        const waveForward = 0.28 * s.wave * s.wave + 0.12 * s.wave;
+        const seaOnly =
+            waveForward * 2.25 + curTerm * 1.05 + windTerm * 0.85 + debrisProxy * 1.1 + depthTerm * 1.15;
+        return Math.min(8.5, Math.max(0.34, 0.28 + seaOnly * 2.65));
     }
-    
-    return Math.min(6.5, Math.max(0.82, weight));
+
+    const blended = 1.0 + marineExposure * 0.92 + depthTerm * 0.62;
+    return Math.min(6.8, Math.max(0.88, blended));
 }
 
 /**
- * Every navigability grid cell the chord crosses must be water (dense steps + unique cells).
- * Globe rendering uses great circles between vertices; we also densify the drawn line so short
- * chords match what we validated in lng/lat space.
+ * Fast geodesic check for A*: samples the same great circle the globe draws, but uses the
+ * water bitmask only (no polygon tests) — millions of calls during search.
  */
-function segmentNavigable(navGrid, lng1, lat1, lng2, lat2) {
-    const len = dist({ lng: lng1, lat: lat1 }, { lng: lng2, lat: lat2 });
-    if (len === 0) return gridIsWater(navGrid, lng1, lat1);
-    const minCell = Math.min(navGrid.stepLon, navGrid.stepLat);
-    const spacing = Math.min(navGrid.sampleSpacing, minCell * 0.22);
-    const steps = Math.max(28, Math.ceil(len / spacing));
-    const seen = new Set();
+function segmentNavigableFast(navGrid, lng1, lat1, lng2, lat2) {
+    const km = haversineKm(lng1, lat1, lng2, lat2);
+    if (km < 1e-4) return gridIsWater(navGrid, lng1, lat1);
+    const midLat = (lat1 + lat2) / 2;
+    const cosLat = Math.max(0.2, Math.cos((midLat * Math.PI) / 180));
+    const kmPerDegLon = 111.32 * cosLat;
+    const minCellKm = Math.min(navGrid.stepLon * kmPerDegLon, navGrid.stepLat * 110.574);
+    const spacingKm = Math.min(2.8, Math.max(0.45, minCellKm * 0.42));
+    const steps = Math.min(52, Math.max(12, Math.ceil(km / spacingKm)));
+    const { west, south, stepLon, stepLat, cols, rows, grid } = navGrid;
+    let lastKey = '';
     for (let s = 0; s <= steps; s++) {
         const t = s / steps;
-        const lng = lng1 + (lng2 - lng1) * t;
-        const lat = lat1 + (lat2 - lat1) * t;
-        const { west, south, stepLon, stepLat, cols, rows, grid } = navGrid;
+        const [lng, lat] = interpolateGeodesic(lng1, lat1, lng2, lat2, t);
         const i = Math.floor((lng - west) / stepLon);
         const j = Math.floor((lat - south) / stepLat);
         const key = `${i},${j}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
+        if (key === lastKey) continue;
+        lastKey = key;
         if (i < 0 || j < 0 || i >= cols || j >= rows) return false;
         if (grid[i + j * cols] !== 1) return false;
     }
     return true;
 }
 
-/** Shorten GeoJSON segments so globe great-circle arcs stay close to validated lng/lat chords. */
-function densifyPathCoords(coords, maxChordDeg) {
+/**
+ * Strict geodesic check: polygon hit-test (runs only on final route geometry, not inside A*).
+ */
+function segmentNavigableStrict(navGrid, lng1, lat1, lng2, lat2) {
+    const km = haversineKm(lng1, lat1, lng2, lat2);
+    if (km < 1e-4) return pointInNavigableWater(navGrid, lng1, lat1);
+    const midLat = (lat1 + lat2) / 2;
+    const cosLat = Math.max(0.2, Math.cos((midLat * Math.PI) / 180));
+    const kmPerDegLon = 111.32 * cosLat;
+    const kmPerDegLat = 110.574;
+    const minCellKm = Math.min(navGrid.stepLon * kmPerDegLon, navGrid.stepLat * kmPerDegLat);
+    const spacingKm = Math.min(2.2, Math.max(0.32, Math.min(minCellKm * 0.36, navGrid.sampleSpacing * kmPerDegLon)));
+    const steps = Math.min(72, Math.max(20, Math.ceil(km / spacingKm)));
+    let lastKey = '';
+    for (let s = 0; s <= steps; s++) {
+        const t = s / steps;
+        const [lng, lat] = interpolateGeodesic(lng1, lat1, lng2, lat2, t);
+        const i = Math.floor((lng - navGrid.west) / navGrid.stepLon);
+        const j = Math.floor((lat - navGrid.south) / navGrid.stepLat);
+        const key = `${i},${j}`;
+        if (key === lastKey) continue;
+        lastKey = key;
+        if (!pointInNavigableWater(navGrid, lng, lat)) return false;
+    }
+    return true;
+}
+
+/**
+ * Insert vertices along each geodesic leg so Mapbox’s rendered great circles cannot “shortcut”
+ * over land between sparse A* nodes (~0.2° apart is usually enough; shore legs get more points).
+ */
+function densifyPathCoordsGeodesic(coords, maxChordKm) {
     if (!coords || coords.length < 2) return coords ? coords.slice() : [];
+    const cap = Math.max(4, maxChordKm);
     const out = [];
     for (let k = 0; k < coords.length - 1; k++) {
         const a = coords[k];
         const b = coords[k + 1];
         if (k === 0) out.push([a[0], a[1]]);
-        const segLen = Math.hypot(b[0] - a[0], b[1] - a[1]);
-        const n = Math.max(1, Math.ceil(segLen / maxChordDeg));
+        const km = haversineKm(a[0], a[1], b[0], b[1]);
+        const n = Math.max(1, Math.ceil(km / cap));
         for (let s = 1; s < n; s++) {
             const t = s / n;
-            out.push([a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])]);
+            out.push(interpolateGeodesic(a[0], a[1], b[0], b[1], t));
         }
         out.push([b[0], b[1]]);
     }
     const dedup = [];
     for (const p of out) {
         const prev = dedup[dedup.length - 1];
-        if (!prev || Math.hypot(p[0] - prev[0], p[1] - prev[1]) > 1e-7) dedup.push(p);
+        if (!prev || haversineKm(p[0], p[1], prev[0], prev[1]) > 0.02) dedup.push(p);
     }
     return dedup;
 }
@@ -620,13 +956,14 @@ function reconstructWaterPath(cameFrom, lastLng, lastLat, startPt, endPt, res) {
 }
 
 /**
- * A* on a lat/lng grid between two navigable sea points; diagonal steps only if segmentNavigable.
- * Returns coordinate array [startSea ... endSea] (endSea appended by reconstruct).
+ * A* on a lat/lng grid between two navigable sea points.
+ * @param {(typeof segmentNavigableFast) | (typeof segmentNavigableStrict)} [opts.segmentCheck]
  */
-function findSeaPathBetween(startSea, endSea, navGrid, hazardField, mode = 'safety') {
-    const gridResolution = 0.2;
-    const closeEnough = 0.55;
-    const maxIterations = 60000;
+function findSeaPathBetween(startSea, endSea, navGrid, hazardField, mode = 'safety', opts = {}) {
+    const gridResolution = opts.gridResolution ?? 0.26;
+    const closeEnough = opts.closeEnough ?? 0.62;
+    const maxIterations = opts.maxIterations ?? 45000;
+    const segmentCheck = opts.segmentCheck ?? segmentNavigableFast;
 
     const endPt = { lng: endSea.lng, lat: endSea.lat };
     const startPt = { lng: startSea.lng, lat: startSea.lat };
@@ -646,7 +983,13 @@ function findSeaPathBetween(startSea, endSea, navGrid, hazardField, mode = 'safe
 
     const sk = gridCellKey(startPt.lng, startPt.lat, res);
     gScore.set(sk, 0);
-    const hScale = hazardField ? (mode === 'distance' ? 1.05 : mode === 'time' ? 1.15 : 1.25) : 1;
+    const hScale = hazardField
+        ? mode === 'distance'
+            ? 1
+            : mode === 'time'
+              ? 1.1
+              : 1.22
+        : 1;
     heapPush(open, { f: dist(startPt, endPt) * hScale, lng: startPt.lng, lat: startPt.lat, g: 0 });
 
     let iterations = 0;
@@ -663,7 +1006,7 @@ function findSeaPathBetween(startSea, endSea, navGrid, hazardField, mode = 'safe
         closed.add(ck);
 
         if (dist(current, endPt) < closeEnough) {
-            if (segmentNavigable(navGrid, current.lng, current.lat, endPt.lng, endPt.lat)) {
+            if (segmentCheck(navGrid, current.lng, current.lat, endPt.lng, endPt.lat)) {
                 return reconstructWaterPath(cameFrom, current.lng, current.lat, startPt, endPt, res);
             }
         }
@@ -673,7 +1016,7 @@ function findSeaPathBetween(startSea, endSea, navGrid, hazardField, mode = 'safe
             const nextLng = current.lng + dLng;
             const nextLat = current.lat + dLat;
 
-            if (!segmentNavigable(navGrid, current.lng, current.lat, nextLng, nextLat)) continue;
+            if (!segmentCheck(navGrid, current.lng, current.lat, nextLng, nextLat)) continue;
 
             const nk = gridCellKey(nextLng, nextLat, res);
             if (closed.has(nk)) continue;
@@ -691,9 +1034,29 @@ function findSeaPathBetween(startSea, endSea, navGrid, hazardField, mode = 'safe
     return [];
 }
 
+/** Coarse → fine search; final entries use strict edge checks so the path survives polygon validation. */
+const SEA_PATH_SEARCH_ATTEMPTS = [
+    { gridResolution: 0.3, closeEnough: 0.72, maxIterations: 38000, segmentCheck: segmentNavigableFast },
+    { gridResolution: 0.24, closeEnough: 0.58, maxIterations: 52000, segmentCheck: segmentNavigableFast },
+    { gridResolution: 0.19, closeEnough: 0.46, maxIterations: 68000, segmentCheck: segmentNavigableFast },
+    { gridResolution: 0.15, closeEnough: 0.38, maxIterations: 85000, segmentCheck: segmentNavigableFast },
+    { gridResolution: 0.12, closeEnough: 0.32, maxIterations: 110000, segmentCheck: segmentNavigableStrict }
+];
+
 /**
- * Land → nearest sea → A* on sea → nearest sea → land. Shore connectors are straight lines (not land-masked).
+ * Land → water (snap if needed) → A* on sea → water → land. Every displayed leg, including shore
+ * connectors, must lie entirely in navigable water when sampled on the geodesic (no land crossings).
  */
+function pathEntirelyOverWater(navGrid, pathLngLat) {
+    if (!pathLngLat || pathLngLat.length < 2) return true;
+    for (let i = 0; i < pathLngLat.length - 1; i++) {
+        const a = pathLngLat[i];
+        const b = pathLngLat[i + 1];
+        if (!segmentNavigableStrict(navGrid, a[0], a[1], b[0], b[1])) return false;
+    }
+    return true;
+}
+
 function findOceanicPath(start, end, navGrid, hazardField, mode = 'safety') {
     const startSea = nearestNavigableFromGrid(start.lng, start.lat, navGrid);
     if (!startSea) {
@@ -703,14 +1066,16 @@ function findOceanicPath(start, end, navGrid, hazardField, mode = 'safety') {
     if (!endSea) {
         return { path: [], err: 'snap_end' };
     }
-    const seaCoords = findSeaPathBetween(startSea, endSea, navGrid, hazardField, mode);
-    if (seaCoords.length < 2) {
-        return { path: [], err: 'no_route' };
+    for (const att of SEA_PATH_SEARCH_ATTEMPTS) {
+        const seaCoords = findSeaPathBetween(startSea, endSea, navGrid, hazardField, mode, att);
+        if (seaCoords.length < 2) continue;
+        const merged = mergeShoreConnectorLegs(navGrid, start, end, seaCoords);
+        if (merged.length < 2) continue;
+        if (pathEntirelyOverWater(navGrid, merged)) {
+            return { path: merged, err: null };
+        }
     }
-    return {
-        path: mergeShoreConnectorLegs(start, end, seaCoords),
-        err: null
-    };
+    return { path: [], err: 'no_route' };
 }
 
 function dist(p1, p2) {
@@ -749,6 +1114,104 @@ function safetyTier(maxWave, maxWindMs, maxCur) {
     return { label: 'HIGH', color: '#dc2626' };
 }
 
+/** Same weighting as the dashboard tier, for hourly buckets (no directional terms). */
+function seaStateScore(wave, windMs, cur) {
+    const w = Number(wave) || 0;
+    const wi = Number(windMs) || 0;
+    const c = Number(cur) || 0;
+    return w * 1.4 + wi * 0.35 + c * 0.08;
+}
+
+function formatUtcHourLabel(isoTime) {
+    if (!isoTime || typeof isoTime !== 'string') return '—';
+    const d = new Date(isoTime);
+    if (Number.isNaN(d.getTime())) return '—';
+    return d.toLocaleString('en-US', {
+        weekday: 'short',
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        timeZone: 'UTC',
+        timeZoneName: 'short'
+    });
+}
+
+/**
+ * Best single hour + longest calmer window from Open-Meteo hourly marine + wind at one point.
+ * @returns {Promise<{ recommended: string, window: string, detail: string } | null>}
+ */
+async function fetchDepartureOutlook(lat, lng) {
+    const la = Number(lat);
+    const ln = Number(lng);
+    if (!Number.isFinite(la) || !Number.isFinite(ln)) return null;
+    const marineUrl =
+        `https://marine-api.open-meteo.com/v1/marine?latitude=${la.toFixed(4)}&longitude=${ln.toFixed(4)}` +
+        '&hourly=wave_height,ocean_current_velocity&forecast_days=3';
+    const windUrl =
+        `https://api.open-meteo.com/v1/forecast?latitude=${la.toFixed(4)}&longitude=${ln.toFixed(4)}` +
+        '&hourly=wind_speed_10m&wind_speed_unit=ms&forecast_days=3';
+    try {
+        const [mr, wr] = await Promise.all([fetch(marineUrl), fetch(windUrl)]);
+        if (!mr.ok || !wr.ok) return null;
+        const mj = await mr.json();
+        const wj = await wr.json();
+        const times = mj.hourly?.time || [];
+        const waves = mj.hourly?.wave_height || [];
+        const curs = mj.hourly?.ocean_current_velocity || [];
+        const winds = wj.hourly?.wind_speed_10m || [];
+        const n = Math.min(times.length, waves.length, curs.length, winds.length);
+        if (n < 6) return null;
+
+        const moderate = 2.15;
+        const scores = [];
+        for (let i = 0; i < n; i++) {
+            scores.push(seaStateScore(waves[i], winds[i], curs[i]));
+        }
+
+        let bestI = 0;
+        for (let i = 1; i < n; i++) {
+            if (scores[i] < scores[bestI]) bestI = i;
+        }
+
+        let runStart = 0;
+        let runLen = 0;
+        let bestStart = 0;
+        let bestLen = 0;
+        for (let i = 0; i <= n; i++) {
+            const ok = i < n && scores[i] < moderate;
+            if (ok) {
+                if (runLen === 0) runStart = i;
+                runLen++;
+            } else {
+                if (runLen > bestLen) {
+                    bestLen = runLen;
+                    bestStart = runStart;
+                }
+                runLen = 0;
+            }
+        }
+
+        const recommended = formatUtcHourLabel(times[bestI]);
+        let window;
+        let detail;
+        if (bestLen >= 3) {
+            const t0 = times[bestStart];
+            const t1 = times[bestStart + bestLen - 1];
+            window = `${formatUtcHourLabel(t0)} → ${formatUtcHourLabel(t1)}`;
+            detail = `${bestLen} consecutive hours under a moderate sea-state threshold (heuristic at route midpoint).`;
+        } else {
+            window = 'No extended calm window in the next ~3 days at this point.';
+            detail =
+                'Conditions rarely stay below the moderate threshold for 3+ hours; consider shorter legs, different timing, or local forecasts.';
+        }
+
+        return { recommended, window, detail };
+    } catch {
+        return null;
+    }
+}
+
 /**
  * Sample along polyline + hazard field for dashboard (marine + wind).
  */
@@ -760,7 +1223,9 @@ async function analyzeRouteData(path, hazardField) {
             maxCur: 0,
             avgHazardMult: 1,
             debrisNote: '—',
-            samples: []
+            samples: [],
+            shallowAlongRoute: [],
+            depthNote: '—'
         };
     }
     const n = path.length;
@@ -776,9 +1241,13 @@ async function analyzeRouteData(path, hazardField) {
     let maxCur = 0;
     let maxWindMs = 0;
     let samples = [];
+    /** @type {{ lng: number, lat: number, minDepthM: number }[]} */
+    let shallowAlongRoute = [];
 
     try {
+        const depthTasks = samplesPoints.map((p) => () => tilequeryMinDepth(p[0], p[1]));
         const [mr, wr] = await Promise.all([fetch(marineUrl), fetch(windUrl)]);
+        const depthResults = await runPool(depthTasks, 16);
         const mData = await mr.json();
         const wData = await wr.json();
         const mList = Array.isArray(mData) ? mData : [mData];
@@ -790,13 +1259,18 @@ async function analyzeRouteData(path, hazardField) {
             maxWave = Math.max(maxWave, wave);
             maxCur = Math.max(maxCur, cur);
             maxWindMs = Math.max(maxWindMs, wind);
+            const d = depthResults[k]?.minDepthM ?? 1e6;
             samples.push({
                 lng: samplesPoints[k][0],
                 lat: samplesPoints[k][1],
                 waveHeight: wave,
                 currentVel: cur,
-                windSpeed: wind
+                windSpeed: wind,
+                depthCeilingM: d < 1e5 ? d : null
             });
+            if (d < 220) {
+                shallowAlongRoute.push({ lng: samplesPoints[k][0], lat: samplesPoints[k][1], minDepthM: d });
+            }
         }
     } catch {
         /* keep zeros */
@@ -816,7 +1290,12 @@ async function analyzeRouteData(path, hazardField) {
             ? 'Higher drift / debris risk in rough seas (no live debris layer — use local notices).'
             : 'No global debris feed; proxy from sea state only.';
 
-    return { maxWave, maxWindMs, maxCur, avgHazardMult, debrisNote, samples };
+    const depthNote =
+        shallowAlongRoute.length > 0
+            ? `Bathymetry v2 (Tilequery): ${shallowAlongRoute.length} sample point(s) on shallow shelf (min_depth ≤ ~220 m). Not a draft survey.`
+            : 'Bathymetry: no shallow shelf hits at sampled points (or no data).';
+
+    return { maxWave, maxWindMs, maxCur, avgHazardMult, debrisNote, samples, shallowAlongRoute, depthNote };
 }
 
 /**
@@ -888,7 +1367,10 @@ btnRoute.addEventListener('click', () => {
         try {
             await ensureRouteSearchViewport(routePoints);
             const navGrid = buildNavigabilityGrid();
-            const hazardField = navGrid ? await buildHazardFieldForNavGrid(navGrid) : null;
+            const shallowPenaltyOn = !!toggleShallowPenalty?.checked;
+            const hazardField = navGrid
+                ? await buildHazardFieldForNavGrid(navGrid, { includeBathymetrySamples: shallowPenaltyOn })
+                : null;
 
             if (!navGrid) {
                 dash.style.display = 'block';
@@ -898,28 +1380,31 @@ btnRoute.addEventListener('click', () => {
             }
 
             const modes = [
-                { id: 'safety', label: 'Safety-First', color: '#dc2626' },
-                { id: 'time', label: 'Balanced Time', color: '#ca8a04' },
-                { id: 'distance', label: 'Shortest Path', color: '#0369a1' }
+                { id: 'distance', label: 'Fastest path', color: '#0369a1' },
+                { id: 'safety', label: 'Safest (waves & sea state)', color: '#dc2626' },
+                { id: 'time', label: 'Balanced', color: '#ca8a04' }
             ];
 
-            const results = [];
-            for (const m of modes) {
-                const chain = computeChainedRoute(routePoints, navGrid, hazardField, m.id);
-                if (chain.path.length >= 2) {
-                    const stats = await analyzeRouteData(chain.path, hazardField);
-                    results.push({ mode: m, path: chain.path, stats });
-                } else {
-                    results.push({ mode: m, path: [], err: chain.err, legIndex: chain.legIndex });
-                }
-            }
+            const results = await Promise.all(
+                modes.map(async (m) => {
+                    const chain = computeChainedRoute(routePoints, navGrid, hazardField, m.id);
+                    if (chain.path.length >= 2) {
+                        const stats = await analyzeRouteData(chain.path, hazardField);
+                        return { mode: m, path: chain.path, stats };
+                    }
+                    return { mode: m, path: [], err: chain.err, legIndex: chain.legIndex };
+                })
+            );
 
-            const validResults = results.filter(r => r.path.length >= 2);
+            const validResults = results.filter((r) => r.path.length >= 2);
             if (validResults.length === 0) {
-                const r0 = results[0];
-                const hint = r0.err === 'snap_start' ? 'No navigable water near start.' :
-                             r0.err === 'snap_end' ? 'No navigable water near end.' :
-                             'No all-water route found.';
+                const r0 = results.find((r) => r.err) || results[0];
+                const hint =
+                    r0.err === 'snap_start'
+                        ? 'No navigable water near the start in this view. Zoom or pan so the ocean is on screen.'
+                        : r0.err === 'snap_end'
+                          ? 'No navigable water near the end in this view. Zoom or pan so the ocean is on screen.'
+                          : 'No continuous sea between these stops in the region Mapbox loaded. Zoom out so the whole crossing fits, then compute route again.';
                 dash.style.display = 'block';
                 dash.innerHTML = `<div style="font-size: 10px; color: #888; margin: 10px 16px;">ROUTING ERROR</div>
                                  <div style="color:#ff4444; padding: 0 16px 10px;">${hint}</div>`;
@@ -928,9 +1413,11 @@ btnRoute.addEventListener('click', () => {
 
             currentResults = validResults;
             drawMultipleRoutes(validResults);
-            updateMultiDash(validResults);
-            
-            // Default select the first one (usually Safety-First)
+            const refPath = validResults[0].path;
+            const mid = refPath[Math.floor(refPath.length / 2)];
+            const launchOutlook = mid ? await fetchDepartureOutlook(mid[1], mid[0]) : null;
+            updateMultiDash(validResults, launchOutlook);
+
             if (validResults.length > 0) {
                 selectRoute(validResults[0].mode.id);
             }
@@ -946,7 +1433,7 @@ function drawMultipleRoutes(validResults) {
     validResults.forEach(res => {
         const sourceId = `route-${res.mode.id}`;
         const layerId = `${sourceId}-line`;
-        const dense = densifyPathCoords(res.path, 0.1);
+        const dense = densifyPathCoordsGeodesic(res.path, 32);
         const geojson = { 'type': 'Feature', 'geometry': { 'type': 'LineString', 'coordinates': dense } };
 
         if (map.getSource(sourceId)) {
@@ -992,6 +1479,32 @@ function selectRoute(modeId) {
     // Update Hazard Markers
     hazardMarkers.forEach(m => m.remove());
     hazardMarkers = [];
+
+    if (selectedRes.stats.shallowAlongRoute?.length) {
+        for (const sh of selectedRes.stats.shallowAlongRoute) {
+            const el = document.createElement('div');
+            el.style.cssText =
+                `width:18px;height:18px;background:#fff7ed;border:2px solid #ea580c;border-radius:50%;` +
+                'display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:9px;font-weight:700;' +
+                'color:#9a3412;box-shadow:0 1px 3px rgba(0,0,0,0.2);';
+            el.textContent = 'S';
+            const popup = new mapboxgl.Popup({
+                closeButton: false,
+                closeOnClick: false,
+                offset: 12
+            }).setHTML(
+                `<div style="font-family:'Google Sans',sans-serif;font-size:12px;padding:4px 8px;">` +
+                `<b>Shallow water</b><br/>Bathymetry min_depth ≤ ~220 m (Tilequery). Not for draft planning.</div>`
+            );
+            el.addEventListener('mouseenter', () => {
+                popup.setLngLat([sh.lng, sh.lat]).addTo(map);
+            });
+            el.addEventListener('mouseleave', () => {
+                popup.remove();
+            });
+            hazardMarkers.push(new mapboxgl.Marker({ element: el }).setLngLat([sh.lng, sh.lat]).addTo(map));
+        }
+    }
 
     if (selectedRes.stats.samples) {
         selectedRes.stats.samples.forEach(s => {
@@ -1046,10 +1559,32 @@ function selectRoute(modeId) {
     }
 }
 
-function updateMultiDash(validResults) {
+function updateMultiDash(validResults, launchOutlook = null) {
     dash.style.display = 'block';
     legend.style.display = 'block';
-    let html = `<div style="font-size: 11px; color: #70757a; margin: 10px 16px 4px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px;">Recommended Routes</div>`;
+    let html = '';
+
+    if (launchOutlook) {
+        html += `<div style="font-size: 11px; color: #70757a; margin: 10px 16px 4px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px;">Departure &amp; launch window</div>
+            <div style="padding: 0 16px 10px; font-size: 12px; color: #3c4043; line-height: 1.45; border-bottom: 1px solid #f1f3f4;">
+                <div style="margin-bottom: 6px;"><span style="color:#70757a;">Recommended departure (calmest hour):</span><br/>
+                <b style="color:#0f766e;">${launchOutlook.recommended}</b></div>
+                <div style="margin-bottom: 6px;"><span style="color:#70757a;">Safer launch window:</span><br/>
+                <b>${launchOutlook.window}</b></div>
+                <div style="font-size: 11px; color: #70757a;">${launchOutlook.detail}</div>
+            </div>`;
+    } else if (validResults.length) {
+        html += `<div style="font-size: 11px; color: #70757a; margin: 10px 16px 4px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px;">Departure &amp; launch window</div>
+            <div style="padding: 0 16px 10px; font-size: 12px; color: #70757a; border-bottom: 1px solid #f1f3f4;">Hourly outlook unavailable (network or API).</div>`;
+    }
+
+    const depthNote0 = validResults[0]?.stats?.depthNote;
+    if (depthNote0) {
+        html += `<div style="font-size: 11px; color: #70757a; margin: 10px 16px 4px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px;">Depth awareness</div>
+            <div style="padding: 0 16px 10px; font-size: 11px; color: #4d5156; line-height: 1.45; border-bottom: 1px solid #f1f3f4;">${depthNote0}</div>`;
+    }
+
+    html += `<div style="font-size: 11px; color: #70757a; margin: 10px 16px 4px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px;">Recommended Routes</div>`;
     validResults.forEach(r => {
         const roughNm = r.path.length * 25;
         const tier = safetyTier(r.stats.maxWave, r.stats.maxWindMs, r.stats.maxCur);
