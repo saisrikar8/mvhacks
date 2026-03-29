@@ -336,7 +336,6 @@ async function callOpenAI(messages) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-            model: 'gpt-4o',
             messages,
             tools: ASSISTANT_TOOLS,
             tool_choice: 'auto'
