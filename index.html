@@ -3,7 +3,12 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>OceanRoute MVP</title>
+  <title>OceanRoute</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="/favicon.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&display=swap" rel="stylesheet" />
   <link href="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css" rel="stylesheet">
   <style>
     body { margin: 0; padding: 0; background: rgb(150, 196, 242); }
@@ -58,35 +63,207 @@
     #legend {
       position: fixed;
       top: 16px;
-      right: 16px;
-      background: #ffffff;
-      color: #3c4043;
-      padding: 12px 16px;
-      border-radius: 8px;
-      box-shadow: 0 1px 2px 0 rgba(60,64,67,0.302), 0 1px 3px 1px rgba(60,64,67,0.149);
-      font-family: 'Google Sans', Roboto, Arial, sans-serif;
+      right: 392px;
       z-index: 20;
-      font-size: 12px;
       display: none;
+      width: 248px;
+      max-width: min(248px, calc(100vw - 420px));
+      font-family: 'DM Sans', 'Google Sans', system-ui, sans-serif;
+      font-size: 12px;
+      color: #e8f4fc;
+      background: linear-gradient(165deg, rgba(15, 42, 68, 0.92) 0%, rgba(8, 51, 68, 0.9) 45%, rgba(6, 40, 54, 0.94) 100%);
+      backdrop-filter: blur(22px);
+      -webkit-backdrop-filter: blur(22px);
+      border-radius: 16px;
+      border: 1px solid rgba(125, 211, 252, 0.22);
+      box-shadow:
+        0 4px 24px rgba(2, 12, 27, 0.45),
+        0 0 0 1px rgba(0, 0, 0, 0.2) inset,
+        0 1px 0 rgba(255, 255, 255, 0.08) inset;
+      overflow: hidden;
+    }
+    #legend::before {
+      content: '';
+      display: block;
+      height: 3px;
+      background: linear-gradient(90deg, #22d3ee, #38bdf8 35%, #2dd4bf 70%, #fbbf24);
+      opacity: 0.95;
+    }
+    .legend-inner {
+      padding: 14px 16px 16px;
+    }
+    .legend-brand {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.15);
+    }
+    .legend-brand-icon {
+      width: 32px;
+      height: 32px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, rgba(56, 189, 248, 0.25), rgba(45, 212, 191, 0.15));
+      border: 1px solid rgba(125, 211, 252, 0.3);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #7dd3fc;
+    }
+    .legend-brand-text {
+      line-height: 1.2;
+    }
+    .legend-brand-text strong {
+      display: block;
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      color: #f0f9ff;
+    }
+    .legend-brand-text span {
+      font-size: 10px;
+      color: #94a3b8;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+    .legend-section-label {
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: #64748b;
+      margin-bottom: 8px;
     }
     .legend-item {
       display: flex;
       align-items: center;
-      gap: 8px;
-      margin-bottom: 4px;
+      gap: 10px;
+      margin-bottom: 6px;
+      padding: 4px 0;
+      border-radius: 8px;
+      transition: background 0.15s ease;
+    }
+    .legend-item:hover {
+      background: rgba(255, 255, 255, 0.04);
     }
     .legend-item:last-child { margin-bottom: 0; }
+    .legend-item span:last-child {
+      color: #cbd5e1;
+      font-size: 11px;
+      line-height: 1.35;
+    }
     .legend-circle {
-      width: 18px;
-      height: 18px;
+      width: 22px;
+      height: 22px;
       border-radius: 50%;
-      border: 1.5px solid #70757a;
+      border: 1.5px solid rgba(148, 163, 184, 0.5);
       display: flex;
       align-items: center;
       justify-content: center;
-      font-weight: bold;
+      font-weight: 700;
       font-size: 10px;
-      color: #3c4043;
+      color: #f1f5f9;
+      flex-shrink: 0;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+    }
+    .legend-divider {
+      height: 1px;
+      margin: 14px 0 12px;
+      background: linear-gradient(90deg, transparent, rgba(125, 211, 252, 0.25), transparent);
+    }
+    #legend-trip-summary {
+      min-height: 72px;
+    }
+    .trip-empty {
+      text-align: center;
+      padding: 12px 8px;
+      font-size: 11px;
+      line-height: 1.45;
+      color: #64748b;
+    }
+    .trip-empty svg {
+      margin: 0 auto 8px;
+      opacity: 0.45;
+      color: #38bdf8;
+    }
+    .trip-stats {
+      display: grid;
+      gap: 10px;
+    }
+    .trip-stat {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      padding: 10px 12px;
+      border-radius: 12px;
+      background: rgba(0, 0, 0, 0.22);
+      border: 1px solid rgba(125, 211, 252, 0.12);
+    }
+    .trip-stat-icon {
+      width: 36px;
+      height: 36px;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .trip-stat-icon.nm {
+      background: linear-gradient(145deg, rgba(251, 191, 36, 0.2), rgba(245, 158, 11, 0.08));
+      color: #fcd34d;
+      border: 1px solid rgba(251, 191, 36, 0.25);
+    }
+    .trip-stat-icon.time {
+      background: linear-gradient(145deg, rgba(56, 189, 248, 0.22), rgba(14, 165, 233, 0.08));
+      color: #7dd3fc;
+      border: 1px solid rgba(56, 189, 248, 0.28);
+    }
+    .trip-stat-body {
+      min-width: 0;
+      flex: 1;
+    }
+    .trip-stat-label {
+      font-size: 9px;
+      font-weight: 600;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: #64748b;
+      margin-bottom: 2px;
+    }
+    .trip-stat-value {
+      font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+      font-size: 18px;
+      font-weight: 700;
+      color: #f8fafc;
+      letter-spacing: -0.02em;
+      line-height: 1.15;
+    }
+    .trip-stat-sub {
+      font-size: 10px;
+      color: #94a3b8;
+      margin-top: 4px;
+      line-height: 1.35;
+    }
+    .trip-route-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 10px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    .trip-route-pill-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      box-shadow: 0 0 8px currentColor;
     }
     .route-item {
       padding: 12px 16px;
@@ -142,38 +319,376 @@
       box-shadow: 0 1px 2px rgba(0,0,0,0.1);
       pointer-events: none;
     }
-    #ocean-controls {
+    #voyage-params {
       position: fixed;
       bottom: 130px;
       left: 16px;
       z-index: 12;
-      background: rgba(255,255,255,0.96);
+      background: rgba(255,255,255,0.98);
       color: #3c4043;
-      padding: 10px 14px;
-      border-radius: 8px;
-      box-shadow: 0 1px 2px 0 rgba(60,64,67,0.302), 0 1px 3px 1px rgba(60,64,67,0.149);
+      padding: 12px 14px;
+      border-radius: 10px;
+      box-shadow: 0 1px 2px 0 rgba(60,64,67,0.302), 0 2px 8px 2px rgba(60,64,67,0.12);
       font-family: 'Google Sans', Roboto, Arial, sans-serif;
       font-size: 12px;
-      line-height: 1.5;
-      max-width: min(280px, 92vw);
+      line-height: 1.45;
+      max-width: min(300px, 92vw);
+      border: 1px solid rgba(218, 220, 224, 0.9);
     }
-    #ocean-controls .oc-title {
+    #voyage-params .vp-title {
       font-size: 10px;
       font-weight: 600;
       color: #70757a;
       letter-spacing: 0.5px;
       text-transform: uppercase;
-      margin-bottom: 6px;
+      margin-bottom: 10px;
     }
-    #ocean-controls label {
+    #voyage-params .vp-row {
       display: flex;
       align-items: center;
       gap: 8px;
-      cursor: pointer;
-      margin-bottom: 4px;
+      margin-bottom: 8px;
     }
-    #ocean-controls label:last-child { margin-bottom: 0; }
-    #ocean-controls input { accent-color: #0d9488; }
+    #voyage-params .vp-row:last-child { margin-bottom: 0; }
+    #voyage-params label.vp-label {
+      flex: 0 0 108px;
+      color: #5f6368;
+      font-size: 11px;
+    }
+    #voyage-params input[type="number"],
+    #voyage-params input[type="datetime-local"] {
+      flex: 1;
+      min-width: 0;
+      border: 1px solid #dadce0;
+      border-radius: 6px;
+      padding: 6px 8px;
+      font-size: 12px;
+      font-family: inherit;
+    }
+    #voyage-params input:focus {
+      outline: none;
+      border-color: #1a73e8;
+      box-shadow: 0 0 0 1px rgba(26, 115, 232, 0.25);
+    }
+    #voyage-params .vp-check {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      cursor: pointer;
+      margin-top: 6px;
+      padding-top: 6px;
+      border-top: 1px solid #f1f3f4;
+      font-size: 11px;
+      color: #4d5156;
+    }
+    #voyage-params .vp-check input { accent-color: #0d9488; margin-top: 2px; flex-shrink: 0; }
+
+    /* AI assistant (right rail) */
+    #ai-assistant {
+      position: fixed;
+      top: 16px;
+      bottom: 16px;
+      right: 16px;
+      width: 360px;
+      max-width: min(360px, calc(100vw - 32px));
+      z-index: 22;
+      background: #ffffff;
+      color: #3c4043;
+      border-radius: 8px;
+      box-shadow: 0 1px 2px 0 rgba(60,64,67,0.302), 0 2px 8px 2px rgba(60,64,67,0.149);
+      font-family: 'Google Sans', Roboto, Arial, sans-serif;
+      font-size: 13px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    #ai-assistant.ai-collapsed {
+      width: 56px;
+      min-width: 56px;
+      top: 50%;
+      bottom: auto;
+      transform: translateY(-50%);
+      right: 0;
+      border-radius: 16px 0 0 16px;
+      background: linear-gradient(165deg, #0c4a6e 0%, #075985 38%, #0d9488 100%);
+      box-shadow: -6px 4px 28px rgba(12, 74, 110, 0.38), inset 0 1px 0 rgba(255,255,255,0.12);
+      border: 1px solid rgba(255,255,255,0.18);
+      border-right: none;
+    }
+    #ai-assistant.ai-collapsed #ai-assistant-inner {
+      display: none;
+    }
+    #ai-assistant.ai-collapsed #ai-assistant-header {
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      padding: 18px 8px;
+      background: transparent;
+      border-bottom: none;
+      gap: 12px;
+      min-height: 152px;
+    }
+    #ai-assistant.ai-collapsed #ai-assistant-title {
+      display: none;
+    }
+    #ai-assistant.ai-collapsed .ai-assistant-mark {
+      display: flex;
+    }
+    #ai-assistant.ai-collapsed #ai-assistant-toggle {
+      width: 40px;
+      height: 40px;
+      border-radius: 12px;
+      background: rgba(255,255,255,0.14);
+      border: 1px solid rgba(255,255,255,0.28);
+      color: #e0f2fe;
+      font-size: 18px;
+      line-height: 1;
+    }
+    #ai-assistant.ai-collapsed #ai-assistant-toggle:hover {
+      background: rgba(255,255,255,0.24);
+    }
+    .ai-assistant-mark {
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      color: #f0f9ff;
+      text-align: center;
+    }
+    .ai-assistant-mark svg {
+      filter: drop-shadow(0 2px 4px rgba(0,0,0,0.2));
+    }
+    .ai-assistant-mark span {
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 1.6px;
+      text-transform: uppercase;
+      opacity: 0.92;
+      line-height: 1.2;
+    }
+    #ai-assistant-inner {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    #ai-assistant-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 12px;
+      border-bottom: 1px solid #f1f3f4;
+      background: #fafafa;
+      font-weight: 600;
+      font-size: 13px;
+      gap: 8px;
+    }
+    #ai-assistant-toggle {
+      flex-shrink: 0;
+      width: 32px;
+      height: 32px;
+      border: 1px solid #dadce0;
+      border-radius: 8px;
+      background: #fff;
+      cursor: pointer;
+      font-size: 14px;
+      line-height: 1;
+      color: #5f6368;
+    }
+    #ai-assistant-toggle:hover { background: #f1f3f4; }
+    #ai-assistant-messages {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      overflow-x: hidden;
+      -webkit-overflow-scrolling: touch;
+      overscroll-behavior: contain;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .ai-msg {
+      padding: 8px 10px;
+      border-radius: 8px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .ai-msg-user {
+      align-self: flex-end;
+      background: #e8f0fe;
+      color: #174ea6;
+      max-width: 92%;
+    }
+    .ai-msg-assistant {
+      align-self: flex-start;
+      background: #f8f9fa;
+      border: 1px solid #e8eaed;
+      max-width: 100%;
+    }
+    .ai-msg-md {
+      white-space: normal;
+    }
+    .ai-msg-md p {
+      margin: 0 0 0.55em;
+    }
+    .ai-msg-md p:last-child {
+      margin-bottom: 0;
+    }
+    .ai-msg-md h1, .ai-msg-md h2, .ai-msg-md h3, .ai-msg-md h4 {
+      margin: 0.65em 0 0.35em;
+      font-weight: 600;
+      line-height: 1.25;
+      color: #202124;
+    }
+    .ai-msg-md h1 { font-size: 1.05em; }
+    .ai-msg-md h2 { font-size: 1em; }
+    .ai-msg-md h3, .ai-msg-md h4 { font-size: 0.95em; color: #3c4043; }
+    .ai-msg-md h1:first-child, .ai-msg-md h2:first-child, .ai-msg-md h3:first-child {
+      margin-top: 0;
+    }
+    .ai-msg-md ul, .ai-msg-md ol {
+      margin: 0.35em 0 0.55em;
+      padding-left: 1.35em;
+    }
+    .ai-msg-md li {
+      margin-bottom: 0.25em;
+    }
+    .ai-msg-md blockquote {
+      margin: 0.4em 0;
+      padding: 0.35em 0.65em;
+      border-left: 3px solid #dadce0;
+      color: #5f6368;
+      background: rgba(255,255,255,0.6);
+      border-radius: 0 6px 6px 0;
+    }
+    .ai-msg-md code {
+      font-family: ui-monospace, 'Cascadia Code', 'Source Code Pro', Menlo, monospace;
+      font-size: 0.88em;
+      background: #e8eaed;
+      padding: 0.12em 0.35em;
+      border-radius: 4px;
+      color: #174ea6;
+    }
+    .ai-msg-md pre {
+      margin: 0.5em 0;
+      padding: 8px 10px;
+      background: #1e293b;
+      color: #e2e8f0;
+      border-radius: 8px;
+      overflow-x: auto;
+      font-size: 11px;
+      line-height: 1.45;
+    }
+    .ai-msg-md pre code {
+      background: transparent;
+      padding: 0;
+      color: inherit;
+      font-size: inherit;
+    }
+    .ai-msg-md a {
+      color: #1a73e8;
+      text-decoration: none;
+    }
+    .ai-msg-md a:hover {
+      text-decoration: underline;
+    }
+    .ai-msg-md hr {
+      border: none;
+      border-top: 1px solid #e8eaed;
+      margin: 0.65em 0;
+    }
+    .ai-msg-md table {
+      border-collapse: collapse;
+      font-size: 12px;
+      margin: 0.5em 0;
+      width: 100%;
+    }
+    .ai-msg-md th, .ai-msg-md td {
+      border: 1px solid #e8eaed;
+      padding: 6px 8px;
+      text-align: left;
+    }
+    .ai-msg-md th {
+      background: #f1f3f4;
+      font-weight: 600;
+    }
+    .ai-msg-tool {
+      align-self: center;
+      font-size: 11px;
+      color: #70757a;
+      font-family: ui-monospace, monospace;
+      background: transparent;
+      border: 1px dashed #dadce0;
+    }
+    #ai-assistant-form {
+      flex-shrink: 0;
+      display: flex;
+      gap: 8px;
+      padding: 10px 12px;
+      border-top: 1px solid #f1f3f4;
+      background: #fff;
+    }
+    #ai-assistant-input {
+      flex: 1;
+      border: 1px solid #dadce0;
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 13px;
+      font-family: inherit;
+    }
+    #ai-assistant-input:focus {
+      outline: none;
+      border-color: #1a73e8;
+      box-shadow: 0 0 0 1px #1a73e8;
+    }
+    #ai-assistant-send {
+      flex-shrink: 0;
+      background: #1a73e8;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 0 16px;
+      font-weight: 500;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    #ai-assistant-send:hover:not(:disabled) { background: #1557b0; }
+    #ai-assistant-send:disabled { opacity: 0.6; cursor: not-allowed; }
+    #ai-assistant-status {
+      flex-shrink: 0;
+      font-size: 11px;
+      color: #70757a;
+      padding: 0 12px 8px;
+      display: none;
+    }
+    @media (max-width: 720px) {
+      #ai-assistant {
+        width: min(360px, calc(100vw - 24px));
+        right: 12px;
+        bottom: 100px;
+        top: auto;
+        max-height: 45vh;
+        transform: none;
+        border-radius: 8px;
+      }
+      #ai-assistant.ai-collapsed {
+        right: 0;
+        bottom: 160px;
+        top: auto;
+        transform: none;
+        width: 52px;
+      }
+      #legend {
+        top: auto;
+        bottom: 200px;
+        right: 12px;
+        width: min(248px, calc(100vw - 24px));
+        max-width: calc(100vw - 24px);
+      }
+    }
   </style>
 </head>
 <body>
@@ -185,10 +700,24 @@
 </div>
 <p id="route-hint">Click the map to add start → waypoints → end. Then Compute route.</p>
 
-<div id="ocean-controls">
-  <div class="oc-title">Under the sea</div>
-  <label><input type="checkbox" id="toggle-bathymetry" checked> Bathymetry overlay (Mapbox v2)</label>
-  <label><input type="checkbox" id="toggle-shallow-penalty"> Shallow-water routing penalty</label>
+<div id="voyage-params">
+  <div class="vp-title">Voyage &amp; vessel</div>
+  <div class="vp-row">
+    <label class="vp-label" for="input-cruise-speed">Cruise (kn)</label>
+    <input type="number" id="input-cruise-speed" min="0.5" max="40" step="0.5" value="12" />
+  </div>
+  <div class="vp-row">
+    <label class="vp-label" for="input-draft">Draft (m)</label>
+    <input type="number" id="input-draft" min="0" max="25" step="0.1" placeholder="optional" />
+  </div>
+  <div class="vp-row">
+    <label class="vp-label" for="input-departure">Depart</label>
+    <input type="datetime-local" id="input-departure" />
+  </div>
+  <label class="vp-check">
+    <input type="checkbox" id="toggle-shallow-penalty" />
+    <span>Shallow-water routing penalty (bathymetry-aware pathing)</span>
+  </label>
 </div>
 
 <div id="loader">
@@ -197,14 +726,58 @@
 </div>
 
 <div id="dash"></div>
-<div id="legend">
-  <div style="font-weight: 500; margin-bottom: 8px; font-size: 13px; color: #70757a; text-transform: uppercase; letter-spacing: 0.5px;">Hazards Key</div>
-  <div class="legend-item"><div class="legend-circle">W</div> <span>High Waves (>2.5m)</span></div>
-  <div class="legend-item"><div class="legend-circle">F</div> <span>Strong Wind (>10m/s)</span></div>
-  <div class="legend-item"><div class="legend-circle">C</div> <span>Strong Current (>0.5m/s)</span></div>
-  <div class="legend-item"><div class="legend-circle" style="background: #dadce0; border-radius: 2px; width: 10px; height: 10px;"></div> <span>Moderate Conditions</span></div>
-  <div class="legend-item"><div class="legend-circle" style="background: linear-gradient(90deg,#bae6fd,#0369a1); border-radius: 2px; width: 18px; height: 10px;"></div> <span>Bathymetry (deeper = darker)</span></div>
-  <div class="legend-item"><div class="legend-circle" style="background: #fed7aa; border-color: #ea580c;">S</div> <span>Shallow shelf (Tilequery / min_depth)</span></div>
+<div id="ai-assistant" aria-label="Route assistant">
+  <div id="ai-assistant-header">
+    <span id="ai-assistant-title">Route assistant</span>
+    <div class="ai-assistant-mark" aria-hidden="true">
+      <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+      </svg>
+      <span>Route AI</span>
+    </div>
+    <button type="button" id="ai-assistant-toggle" aria-expanded="true" title="Collapse assistant">◀</button>
+  </div>
+  <div id="ai-assistant-inner">
+    <div id="ai-assistant-messages"></div>
+    <div id="ai-assistant-status"></div>
+    <form id="ai-assistant-form">
+      <input type="text" id="ai-assistant-input" placeholder="Ask to set waypoints, compute route…" autocomplete="off" />
+      <button type="submit" id="ai-assistant-send">Send</button>
+    </form>
+  </div>
+</div>
+
+<div id="legend" aria-label="Map legend and voyage summary">
+  <div class="legend-inner">
+    <div class="legend-brand">
+      <div class="legend-brand-icon" aria-hidden="true">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"/><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/><circle cx="12" cy="12" r="3"/>
+        </svg>
+      </div>
+      <div class="legend-brand-text">
+        <strong>OceanRoute</strong>
+        <span>Live layer key</span>
+      </div>
+    </div>
+    <div class="legend-section-label">Hazards key</div>
+    <div class="legend-item"><div class="legend-circle">W</div> <span>High waves (&gt;2.5&nbsp;m)</span></div>
+    <div class="legend-item"><div class="legend-circle">F</div> <span>Strong wind (&gt;10&nbsp;m/s)</span></div>
+    <div class="legend-item"><div class="legend-circle">C</div> <span>Strong current (&gt;0.5&nbsp;m/s)</span></div>
+    <div class="legend-item"><div class="legend-circle" style="background: rgba(148,163,184,0.35); border-radius: 4px; width: 12px; height: 12px; font-size: 0;"></div> <span>Moderate conditions</span></div>
+    <div class="legend-item"><div class="legend-circle" style="background: linear-gradient(90deg,#38bdf8,#0c4a6e); border-radius: 4px; width: 20px; height: 10px; font-size: 0;"></div> <span>Bathymetry (depth)</span></div>
+    <div class="legend-item"><div class="legend-circle" style="background: linear-gradient(180deg,#fdba74,#ea580c); border-color: rgba(251,146,60,0.6);">S</div> <span>Shallow shelf</span></div>
+    <div class="legend-divider"></div>
+    <div class="legend-section-label">Active voyage</div>
+    <div id="legend-trip-summary">
+      <div class="trip-empty">
+        <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 17h18l-2-8H5l-2 8zM3 17l-1-3h20l-1 3"/><path d="M9 11V6a3 3 0 0 1 3-3v0a3 3 0 0 1 3 3v5"/>
+        </svg>
+        Compute a route to see distance, sea time, and ETA from your cruise speed and departure.
+      </div>
+    </div>
+  </div>
 </div>
 <div id="map"></div>
 
