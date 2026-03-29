@@ -1,4 +1,5 @@
 import mapboxgl from 'mapbox-gl';
+import { initRouteAssistant } from './assistant.js';
 import bbox from '@turf/bbox';
 import buffer from '@turf/buffer';
 import booleanPointInPolygon from '@turf/boolean-point-in-polygon';
@@ -6,6 +7,17 @@ import { lineString } from '@turf/helpers';
 
 const MB_TOKEN = import.meta.env.VITE_MAP_API_KEY;
 mapboxgl.accessToken = MB_TOKEN;
+
+/** Dedupe Tilequery + Open-Meteo during one “Compute route” run. */
+/** @type {Map<string, Promise<{ minDepthM: number }>> | null} */
+let tilequeryDepthCache = null;
+/** @type {Map<string, Promise<any>> | null} */
+let routeJsonFetchCache = null;
+
+function resetRoutingFetchCaches() {
+    tilequeryDepthCache = new Map();
+    routeJsonFetchCache = new Map();
+}
 
 const map = new mapboxgl.Map({
     container: 'map',
@@ -23,8 +35,10 @@ const legend = document.getElementById('legend');
 const btnRoute = document.getElementById('btn-route');
 const btnUndo = document.getElementById('btn-undo');
 const btnClear = document.getElementById('btn-clear');
-const toggleBathymetry = document.getElementById('toggle-bathymetry');
 const toggleShallowPenalty = document.getElementById('toggle-shallow-penalty');
+const inputCruiseSpeed = document.getElementById('input-cruise-speed');
+const inputDraft = document.getElementById('input-draft');
+const inputDeparture = document.getElementById('input-departure');
 
 const BATHYMETRY_SOURCE_ID = 'mapbox-bathymetry-v2';
 const BATHYMETRY_LAYER_FILL = 'bathymetry-depth-fill';
@@ -34,10 +48,18 @@ const BATHYMETRY_LAYER_SHALLOW = 'bathymetry-shallow-warn';
 let routeMarkers = [];
 /** @type {mapboxgl.Marker[]} */
 let hazardMarkers = [];
+/** @type {mapboxgl.Marker | null} */
+let routeShipMarker = null;
+/** @type {number | null} */
+let routeShipRaf = null;
 /** @type {mapboxgl.LngLat[]} */
 let routePoints = [];
 /** @type {any[]} */
 let currentResults = [];
+/** @type {string | null} */
+let selectedRouteModeId = null;
+/** @type {object | null} */
+let lastLaunchOutlook = null;
 
 function applyVibrantCoastalPalette() {
     try {
@@ -147,9 +169,43 @@ function setBathymetryOverlayVisible(on) {
     }
 }
 
-if (toggleBathymetry) {
-    toggleBathymetry.addEventListener('change', () => {
-        setBathymetryOverlayVisible(!!toggleBathymetry.checked);
+function getCruiseSpeedKts() {
+    const v = inputCruiseSpeed ? parseFloat(inputCruiseSpeed.value) : NaN;
+    return Number.isFinite(v) && v > 0 ? v : 12;
+}
+
+function getDeclaredDraftM() {
+    const v = inputDraft ? parseFloat(inputDraft.value) : NaN;
+    return Number.isFinite(v) && v > 0 ? v : null;
+}
+
+function getDepartureDate() {
+    if (!inputDeparture?.value) return null;
+    const d = new Date(inputDeparture.value);
+    return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function isShallowPenaltyOn() {
+    return !!toggleShallowPenalty?.checked;
+}
+
+function formatSeaDurationHours(hours) {
+    if (!Number.isFinite(hours) || hours <= 0) return null;
+    if (hours < 72) return `≈ ${hours.toFixed(1)} h at sea`;
+    const d = Math.floor(hours / 24);
+    const h = Math.round(hours % 24);
+    return `≈ ${d}d ${h}h at sea`;
+}
+
+function formatEtaLocal(departure, hoursEnRoute) {
+    if (!departure || !Number.isFinite(hoursEnRoute)) return null;
+    const arr = new Date(departure.getTime() + hoursEnRoute * 3600000);
+    return arr.toLocaleString(undefined, {
+        weekday: 'short',
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
     });
 }
 
@@ -163,7 +219,7 @@ map.on('load', () => {
         'star-intensity': 0.075
     });
     addBathymetryLayers();
-    setBathymetryOverlayVisible(!!toggleBathymetry?.checked);
+    setBathymetryOverlayVisible(true);
 });
 
 /** Coarse centerlines for major ship canals (Mapbox `waterway` often has minzoom 8 — these still work when zoomed out). */
@@ -520,7 +576,7 @@ function edgeBearingDeg(lng1, lat1, lng2, lat2) {
 }
 
 /** Smallest `min_depth` from Tilequery (Mapbox Bathymetry v2); large sentinel if unknown. */
-async function tilequeryMinDepth(lng, lat) {
+async function tilequeryMinDepthUncached(lng, lat) {
     if (!MB_TOKEN) return { minDepthM: 1e6 };
     const url =
         `https://api.mapbox.com/v4/mapbox.mapbox-bathymetry-v2/tilequery/` +
@@ -539,6 +595,42 @@ async function tilequeryMinDepth(lng, lat) {
     } catch {
         return { minDepthM: 1e6 };
     }
+}
+
+async function tilequeryMinDepth(lng, lat) {
+    const k = `${Number(lng).toFixed(4)},${Number(lat).toFixed(4)}`;
+    if (tilequeryDepthCache) {
+        let p = tilequeryDepthCache.get(k);
+        if (!p) {
+            p = tilequeryMinDepthUncached(lng, lat);
+            tilequeryDepthCache.set(k, p);
+        }
+        return p;
+    }
+    return tilequeryMinDepthUncached(lng, lat);
+}
+
+function fetchJsonCached(url) {
+    if (!routeJsonFetchCache) {
+        return fetch(url).then((r) => {
+            if (!r.ok) throw new Error(String(r.status));
+            return r.json();
+        });
+    }
+    let p = routeJsonFetchCache.get(url);
+    if (!p) {
+        p = fetch(url)
+            .then((r) => {
+                if (!r.ok) throw new Error(String(r.status));
+                return r.json();
+            })
+            .catch((e) => {
+                routeJsonFetchCache.delete(url);
+                throw e;
+            });
+        routeJsonFetchCache.set(url, p);
+    }
+    return p;
 }
 
 async function runPool(tasks, concurrency) {
@@ -582,10 +674,7 @@ async function buildHazardFieldForNavGrid(navGrid, opts = {}) {
     const marineUrl = `https://marine-api.open-meteo.com/v1/marine?latitude=${latStr}&longitude=${lngStr}&current=wave_height,ocean_current_velocity,ocean_current_direction`;
     const windUrl = `https://api.open-meteo.com/v1/forecast?latitude=${latStr}&longitude=${lngStr}&current=wind_speed_10m,wind_direction_10m&wind_speed_unit=ms`;
     try {
-        const [mr, wr] = await Promise.all([fetch(marineUrl), fetch(windUrl)]);
-        if (!mr.ok || !wr.ok) return null;
-        const mData = await mr.json();
-        const wData = await wr.json();
+        const [mData, wData] = await Promise.all([fetchJsonCached(marineUrl), fetchJsonCached(windUrl)]);
         const mList = Array.isArray(mData) ? mData : [mData];
         const wList = Array.isArray(wData) ? wData : [wData];
         const n = cols * rows;
@@ -615,7 +704,7 @@ async function buildHazardFieldForNavGrid(navGrid, opts = {}) {
                 const r = await tilequeryMinDepth(lngs[k], lat);
                 minDepth[k] = r.minDepthM;
             });
-            await runPool(tasks, 24);
+            await runPool(tasks, 40);
             out.minDepth = minDepth;
         }
         return out;
@@ -845,6 +934,120 @@ function densifyPathCoordsGeodesic(coords, maxChordKm) {
     return dedup;
 }
 
+/** Initial bearing from (lon1,lat1) to (lon2,lat2), degrees clockwise from north (Mapbox marker rotation). */
+function bearingDegrees(lon1, lat1, lon2, lat2) {
+    const φ1 = (lat1 * Math.PI) / 180;
+    const φ2 = (lat2 * Math.PI) / 180;
+    const Δλ = ((lon2 - lon1) * Math.PI) / 180;
+    const y = Math.sin(Δλ) * Math.cos(φ2);
+    const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+    const deg = (Math.atan2(y, x) * 180) / Math.PI;
+    return ((deg % 360) + 360) % 360;
+}
+
+function buildRouteCumulativeKm(coords) {
+    const cum = [0];
+    let d = 0;
+    for (let i = 1; i < coords.length; i++) {
+        d += haversineKm(coords[i - 1][0], coords[i - 1][1], coords[i][0], coords[i][1]);
+        cum.push(d);
+    }
+    return cum;
+}
+
+/** @returns {[number, number]} lng, lat */
+function positionAlongRouteByParam(coords, cumKm, u) {
+    const total = cumKm[cumKm.length - 1];
+    if (total <= 0 || coords.length < 2) return [coords[0][0], coords[0][1]];
+    let target = u * total;
+    if (target <= 0) return [coords[0][0], coords[0][1]];
+    if (target >= total) return [coords[coords.length - 1][0], coords[coords.length - 1][1]];
+    for (let i = 1; i < cumKm.length; i++) {
+        if (cumKm[i] >= target) {
+            const a = cumKm[i - 1];
+            const seg = cumKm[i] - a;
+            const t = seg > 1e-9 ? (target - a) / seg : 0;
+            const p0 = coords[i - 1];
+            const p1 = coords[i];
+            return [p0[0] + t * (p1[0] - p0[0]), p0[1] + t * (p1[1] - p0[1])];
+        }
+    }
+    const last = coords[coords.length - 1];
+    return [last[0], last[1]];
+}
+
+function makeRouteShipElement() {
+    const wrap = document.createElement('div');
+    wrap.style.cssText =
+        'width:40px;height:40px;pointer-events:none;filter:drop-shadow(0 2px 4px rgba(0,0,0,0.35));';
+    wrap.innerHTML = `
+<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 40 40" aria-hidden="true">
+  <path fill="#1e3a5f" stroke="#0f172a" stroke-width="0.75" stroke-linejoin="round"
+    d="M20 4 L32 28 L28 32 L20 29 L12 32 L8 28 Z"/>
+  <path fill="#e2e8f0" d="M20 8 L26 24 L20 22 L14 24 Z"/>
+  <circle cx="20" cy="14" r="2" fill="#fbbf24"/>
+</svg>`;
+    return wrap;
+}
+
+const ROUTE_SHIP_LOOP_SEC = 68;
+
+function stopRouteShipAnimation() {
+    if (routeShipRaf != null) {
+        cancelAnimationFrame(routeShipRaf);
+        routeShipRaf = null;
+    }
+    if (routeShipMarker) {
+        routeShipMarker.remove();
+        routeShipMarker = null;
+    }
+}
+
+function startRouteShipAnimation(pathCoords) {
+    stopRouteShipAnimation();
+    if (!pathCoords || pathCoords.length < 2) return;
+
+    const dense = densifyPathCoordsGeodesic(pathCoords, 20);
+    if (dense.length < 2) return;
+
+    const cumKm = buildRouteCumulativeKm(dense);
+    const totalKm = cumKm[cumKm.length - 1];
+    if (totalKm <= 0) return;
+
+    const el = makeRouteShipElement();
+    routeShipMarker = new mapboxgl.Marker({
+        element: el,
+        rotationAlignment: 'map',
+        pitchAlignment: 'map'
+    })
+        .setLngLat(dense[0])
+        .addTo(map);
+
+    const lookAheadU = Math.min(0.025, 5 / Math.max(totalKm, 1));
+
+    const t0 = performance.now();
+    const tick = (now) => {
+        if (!routeShipMarker) return;
+        const elapsed = (now - t0) / 1000;
+        const u = (elapsed % ROUTE_SHIP_LOOP_SEC) / ROUTE_SHIP_LOOP_SEC;
+        const [lng, lat] = positionAlongRouteByParam(dense, cumKm, u);
+        let uFwd = Math.min(1, u + lookAheadU);
+        let [lng2, lat2] = positionAlongRouteByParam(dense, cumKm, uFwd);
+        let bearing;
+        if (uFwd <= u || haversineKm(lng, lat, lng2, lat2) < 0.0003) {
+            const uBack = Math.max(0, u - Math.max(lookAheadU, 1e-5));
+            const [lb, bb] = positionAlongRouteByParam(dense, cumKm, uBack);
+            bearing = bearingDegrees(lb, bb, lng, lat);
+        } else {
+            bearing = bearingDegrees(lng, lat, lng2, lat2);
+        }
+        routeShipMarker.setLngLat([lng, lat]);
+        routeShipMarker.setRotation(bearing);
+        routeShipRaf = requestAnimationFrame(tick);
+    };
+    routeShipRaf = requestAnimationFrame(tick);
+}
+
 function gridCellKey(lng, lat, res) {
     const i = Math.round(lng / res);
     const j = Math.round(lat / res);
@@ -1034,13 +1237,12 @@ function findSeaPathBetween(startSea, endSea, navGrid, hazardField, mode = 'safe
     return [];
 }
 
-/** Coarse → fine search; final entries use strict edge checks so the path survives polygon validation. */
+/** Coarse → fine search; final entry uses strict edge checks so the path survives polygon validation. */
 const SEA_PATH_SEARCH_ATTEMPTS = [
-    { gridResolution: 0.3, closeEnough: 0.72, maxIterations: 38000, segmentCheck: segmentNavigableFast },
-    { gridResolution: 0.24, closeEnough: 0.58, maxIterations: 52000, segmentCheck: segmentNavigableFast },
-    { gridResolution: 0.19, closeEnough: 0.46, maxIterations: 68000, segmentCheck: segmentNavigableFast },
-    { gridResolution: 0.15, closeEnough: 0.38, maxIterations: 85000, segmentCheck: segmentNavigableFast },
-    { gridResolution: 0.12, closeEnough: 0.32, maxIterations: 110000, segmentCheck: segmentNavigableStrict }
+    { gridResolution: 0.34, closeEnough: 0.8, maxIterations: 26000, segmentCheck: segmentNavigableFast },
+    { gridResolution: 0.24, closeEnough: 0.58, maxIterations: 42000, segmentCheck: segmentNavigableFast },
+    { gridResolution: 0.17, closeEnough: 0.42, maxIterations: 62000, segmentCheck: segmentNavigableFast },
+    { gridResolution: 0.12, closeEnough: 0.32, maxIterations: 88000, segmentCheck: segmentNavigableStrict }
 ];
 
 /**
@@ -1212,68 +1414,51 @@ async function fetchDepartureOutlook(lat, lng) {
     }
 }
 
-/**
- * Sample along polyline + hazard field for dashboard (marine + wind).
- */
-async function analyzeRouteData(path, hazardField) {
-    if (path.length < 2) {
-        return {
-            maxWave: 0,
-            maxWindMs: 0,
-            maxCur: 0,
-            avgHazardMult: 1,
-            debrisNote: '—',
-            samples: [],
-            shallowAlongRoute: [],
-            depthNote: '—'
-        };
-    }
-    const n = path.length;
-    const idxs = new Set([0, Math.floor(n / 4), Math.floor(n / 2), Math.floor((3 * n) / 4), n - 1]);
-    const samplesPoints = [...idxs].filter((i) => i >= 0 && i < n).sort((a, b) => a - b).map((i) => path[i]);
+function emptyRouteStats() {
+    return {
+        maxWave: 0,
+        maxWindMs: 0,
+        maxCur: 0,
+        avgHazardMult: 1,
+        debrisNote: '—',
+        samples: [],
+        shallowAlongRoute: [],
+        depthNote: '—'
+    };
+}
 
-    const lats = samplesPoints.map((p) => p[1].toFixed(3)).join(',');
-    const lngs = samplesPoints.map((p) => p[0].toFixed(3)).join(',');
-    const marineUrl = `https://marine-api.open-meteo.com/v1/marine?latitude=${lats}&longitude=${lngs}&current=wave_height,ocean_current_velocity`;
-    const windUrl = `https://api.open-meteo.com/v1/forecast?latitude=${lats}&longitude=${lngs}&current=wind_speed_10m&wind_speed_unit=ms`;
+/**
+ * Dashboard stats for one path using pre-fetched sample-point marine + depth data.
+ * @param {number[][]} path
+ * @param {object | null} hazardField
+ * @param {{ lng: number, lat: number, wave: number, cur: number, wind: number, minDepthM: number }[]} rows
+ */
+function buildRouteStatsFromSamples(path, hazardField, rows) {
+    if (path.length < 2) return emptyRouteStats();
 
     let maxWave = 0;
     let maxCur = 0;
     let maxWindMs = 0;
-    let samples = [];
+    const samples = [];
     /** @type {{ lng: number, lat: number, minDepthM: number }[]} */
-    let shallowAlongRoute = [];
+    const shallowAlongRoute = [];
 
-    try {
-        const depthTasks = samplesPoints.map((p) => () => tilequeryMinDepth(p[0], p[1]));
-        const [mr, wr] = await Promise.all([fetch(marineUrl), fetch(windUrl)]);
-        const depthResults = await runPool(depthTasks, 16);
-        const mData = await mr.json();
-        const wData = await wr.json();
-        const mList = Array.isArray(mData) ? mData : [mData];
-        const wList = Array.isArray(wData) ? wData : [wData];
-        for (let k = 0; k < mList.length; k++) {
-            const wave = Number(mList[k].current?.wave_height) || 0;
-            const cur = Number(mList[k].current?.ocean_current_velocity) || 0;
-            const wind = Number(wList[k]?.current?.wind_speed_10m) || 0;
-            maxWave = Math.max(maxWave, wave);
-            maxCur = Math.max(maxCur, cur);
-            maxWindMs = Math.max(maxWindMs, wind);
-            const d = depthResults[k]?.minDepthM ?? 1e6;
-            samples.push({
-                lng: samplesPoints[k][0],
-                lat: samplesPoints[k][1],
-                waveHeight: wave,
-                currentVel: cur,
-                windSpeed: wind,
-                depthCeilingM: d < 1e5 ? d : null
-            });
-            if (d < 220) {
-                shallowAlongRoute.push({ lng: samplesPoints[k][0], lat: samplesPoints[k][1], minDepthM: d });
-            }
+    for (const row of rows) {
+        maxWave = Math.max(maxWave, row.wave);
+        maxCur = Math.max(maxCur, row.cur);
+        maxWindMs = Math.max(maxWindMs, row.wind);
+        const d = row.minDepthM;
+        samples.push({
+            lng: row.lng,
+            lat: row.lat,
+            waveHeight: row.wave,
+            currentVel: row.cur,
+            windSpeed: row.wind,
+            depthCeilingM: d < 1e5 ? d : null
+        });
+        if (d < 220) {
+            shallowAlongRoute.push({ lng: row.lng, lat: row.lat, minDepthM: d });
         }
-    } catch {
-        /* keep zeros */
     }
 
     let multSum = 0;
@@ -1296,6 +1481,101 @@ async function analyzeRouteData(path, hazardField) {
             : 'Bathymetry: no shallow shelf hits at sampled points (or no data).';
 
     return { maxWave, maxWindMs, maxCur, avgHazardMult, debrisNote, samples, shallowAlongRoute, depthNote };
+}
+
+/**
+ * One Open-Meteo + Tilequery batch for all paths (dedupes points across fastest/safest/balanced).
+ * @param {number[][][]} paths
+ */
+async function analyzeMultipleRoutePaths(paths, hazardField) {
+    if (paths.length === 0) return [];
+
+    const pathMeta = paths.map((path) => {
+        const n = path.length;
+        if (n < 2) return { path, pts: [] };
+        const idxs = [
+            ...new Set([0, Math.floor(n / 4), Math.floor(n / 2), Math.floor((3 * n) / 4), n - 1])
+        ]
+            .filter((i) => i >= 0 && i < n)
+            .sort((a, b) => a - b);
+        return { path, pts: idxs.map((i) => path[i]) };
+    });
+
+    const ptKey = (p) => `${Number(p[0]).toFixed(4)},${Number(p[1]).toFixed(4)}`;
+    const uniqKeys = [];
+    const keyToPt = new Map();
+    for (const { pts } of pathMeta) {
+        for (const p of pts) {
+            const k = ptKey(p);
+            if (!keyToPt.has(k)) {
+                keyToPt.set(k, p);
+                uniqKeys.push(k);
+            }
+        }
+    }
+    const uniqPts = uniqKeys.map((k) => keyToPt.get(k));
+
+    if (uniqPts.length === 0) {
+        return pathMeta.map(({ path }) => buildRouteStatsFromSamples(path, hazardField, []));
+    }
+
+    const lats = uniqPts.map((p) => p[1].toFixed(3)).join(',');
+    const lngs = uniqPts.map((p) => p[0].toFixed(3)).join(',');
+    const marineUrl = `https://marine-api.open-meteo.com/v1/marine?latitude=${lats}&longitude=${lngs}&current=wave_height,ocean_current_velocity`;
+    const windUrl = `https://api.open-meteo.com/v1/forecast?latitude=${lats}&longitude=${lngs}&current=wind_speed_10m&wind_speed_unit=ms`;
+
+    let mList = [];
+    let wList = [];
+    try {
+        const [mData, wData] = await Promise.all([fetchJsonCached(marineUrl), fetchJsonCached(windUrl)]);
+        mList = Array.isArray(mData) ? mData : [mData];
+        wList = Array.isArray(wData) ? wData : [wData];
+    } catch {
+        mList = [];
+        wList = [];
+    }
+
+    const keyMeta = new Map();
+    for (let k = 0; k < uniqPts.length; k++) {
+        const p = uniqPts[k];
+        const kk = ptKey(p);
+        const m = mList[k] || {};
+        const wc = wList[k] || {};
+        keyMeta.set(kk, {
+            lng: p[0],
+            lat: p[1],
+            wave: Number(m.current?.wave_height) || 0,
+            cur: Number(m.current?.ocean_current_velocity) || 0,
+            wind: Number(wc.current?.wind_speed_10m) || 0,
+            minDepthM: 1e6
+        });
+    }
+
+    const depthTasks = uniqPts.map((p) => () => tilequeryMinDepth(p[0], p[1]));
+    const depthResults = await runPool(depthTasks, 40);
+    for (let k = 0; k < uniqPts.length; k++) {
+        const kk = ptKey(uniqPts[k]);
+        const row = keyMeta.get(kk);
+        if (row) row.minDepthM = depthResults[k]?.minDepthM ?? 1e6;
+    }
+
+    return pathMeta.map(({ path, pts }) => {
+        if (path.length < 2) return emptyRouteStats();
+        const rows = pts.map((p) => {
+            const meta = keyMeta.get(ptKey(p));
+            return (
+                meta || {
+                    lng: p[0],
+                    lat: p[1],
+                    wave: 0,
+                    cur: 0,
+                    wind: 0,
+                    minDepthM: 1e6
+                }
+            );
+        });
+        return buildRouteStatsFromSamples(path, hazardField, rows);
+    });
 }
 
 /**
@@ -1345,12 +1625,15 @@ function undoLastPoint() {
 }
 
 function clearRouteOverlays() {
+    stopRouteShipAnimation();
     for (const m of routeMarkers) m.remove();
     for (const m of hazardMarkers) m.remove();
     routeMarkers = [];
     hazardMarkers = [];
     routePoints = [];
     currentResults = [];
+    selectedRouteModeId = null;
+    lastLaunchOutlook = null;
     btnRoute.disabled = true;
     ['route-safety', 'route-time', 'route-distance'].forEach(id => {
         if (map.getLayer(id + '-line')) map.removeLayer(id + '-line');
@@ -1358,75 +1641,95 @@ function clearRouteOverlays() {
     });
     dash.style.display = 'none';
     legend.style.display = 'none';
+    const tripEl = document.getElementById('legend-trip-summary');
+    if (tripEl) tripEl.innerHTML = LEGEND_TRIP_EMPTY_HTML;
+}
+
+/**
+ * Runs the same pipeline as "Compute route" (Mapbox water grid + multi-mode paths + dash).
+ * @returns {{ ok: true } | { ok: false, error: string }}
+ */
+async function runRouteComputation() {
+    if (routePoints.length < 2) {
+        return { ok: false, error: 'Need at least two waypoints (start and end).' };
+    }
+    loader.style.display = 'block';
+    try {
+        resetRoutingFetchCaches();
+
+        await ensureRouteSearchViewport(routePoints);
+        const navGrid = buildNavigabilityGrid();
+        const shallowPenaltyOn = isShallowPenaltyOn();
+        const hazardField = navGrid
+            ? await buildHazardFieldForNavGrid(navGrid, { includeBathymetrySamples: shallowPenaltyOn })
+            : null;
+
+        if (!navGrid) {
+            dash.style.display = 'block';
+            dash.innerHTML = `<div style="font-size: 10px; color: #888; margin-bottom: 5px;">SAFETY ROUTING</div>
+                             <span style="color:#ff8866;">Could not read water polygons. Wait and try again.</span>`;
+            return { ok: false, error: 'nav_grid_unavailable' };
+        }
+
+        const w0 = routePoints[0];
+        const wN = routePoints[routePoints.length - 1];
+        const outlookP = fetchDepartureOutlook((w0.lat + wN.lat) / 2, (w0.lng + wN.lng) / 2);
+
+        const modes = [
+            { id: 'distance', label: 'Fastest path', color: '#0369a1' },
+            { id: 'safety', label: 'Safest (waves & sea state)', color: '#dc2626' },
+            { id: 'time', label: 'Balanced', color: '#ca8a04' }
+        ];
+
+        const chains = modes.map((m) => computeChainedRoute(routePoints, navGrid, hazardField, m.id));
+        const batchPaths = chains.filter((c) => c.path.length >= 2).map((c) => c.path);
+        const statsBatch =
+            batchPaths.length > 0 ? await analyzeMultipleRoutePaths(batchPaths, hazardField) : [];
+        let statsI = 0;
+        const results = modes.map((m, i) => {
+            const chain = chains[i];
+            if (chain.path.length >= 2) {
+                return { mode: m, path: chain.path, stats: statsBatch[statsI++] };
+            }
+            return { mode: m, path: [], err: chain.err, legIndex: chain.legIndex };
+        });
+
+        const validResults = results.filter((r) => r.path.length >= 2);
+        if (validResults.length === 0) {
+            void outlookP.catch(() => {});
+            const r0 = results.find((r) => r.err) || results[0];
+            const hint =
+                r0.err === 'snap_start'
+                    ? 'No navigable water near the start in this view. Zoom or pan so the ocean is on screen.'
+                    : r0.err === 'snap_end'
+                      ? 'No navigable water near the end in this view. Zoom or pan so the ocean is on screen.'
+                      : 'No continuous sea between these stops in the region Mapbox loaded. Zoom out so the whole crossing fits, then compute route again.';
+            dash.style.display = 'block';
+            dash.innerHTML = `<div style="font-size: 10px; color: #888; margin: 10px 16px;">ROUTING ERROR</div>
+                             <div style="color:#ff4444; padding: 0 16px 10px;">${hint}</div>`;
+            return { ok: false, error: r0.err || 'no_route', hint };
+        }
+
+        currentResults = validResults;
+        drawMultipleRoutes(validResults);
+        const launchOutlook = await outlookP;
+        lastLaunchOutlook = launchOutlook;
+            updateMultiDash(validResults, launchOutlook);
+
+        if (validResults.length > 0) {
+            selectRoute(validResults[0].mode.id);
+        }
+        return { ok: true };
+    } catch (err) {
+        console.error(err);
+        return { ok: false, error: String(err?.message || err) };
+    } finally {
+        loader.style.display = 'none';
+    }
 }
 
 btnRoute.addEventListener('click', () => {
-    (async () => {
-        if (routePoints.length < 2) return;
-        loader.style.display = 'block';
-        try {
-            await ensureRouteSearchViewport(routePoints);
-            const navGrid = buildNavigabilityGrid();
-            const shallowPenaltyOn = !!toggleShallowPenalty?.checked;
-            const hazardField = navGrid
-                ? await buildHazardFieldForNavGrid(navGrid, { includeBathymetrySamples: shallowPenaltyOn })
-                : null;
-
-            if (!navGrid) {
-                dash.style.display = 'block';
-                dash.innerHTML = `<div style="font-size: 10px; color: #888; margin-bottom: 5px;">SAFETY ROUTING</div>
-                                 <span style="color:#ff8866;">Could not read water polygons. Wait and try again.</span>`;
-                return;
-            }
-
-            const modes = [
-                { id: 'distance', label: 'Fastest path', color: '#0369a1' },
-                { id: 'safety', label: 'Safest (waves & sea state)', color: '#dc2626' },
-                { id: 'time', label: 'Balanced', color: '#ca8a04' }
-            ];
-
-            const results = await Promise.all(
-                modes.map(async (m) => {
-                    const chain = computeChainedRoute(routePoints, navGrid, hazardField, m.id);
-                    if (chain.path.length >= 2) {
-                        const stats = await analyzeRouteData(chain.path, hazardField);
-                        return { mode: m, path: chain.path, stats };
-                    }
-                    return { mode: m, path: [], err: chain.err, legIndex: chain.legIndex };
-                })
-            );
-
-            const validResults = results.filter((r) => r.path.length >= 2);
-            if (validResults.length === 0) {
-                const r0 = results.find((r) => r.err) || results[0];
-                const hint =
-                    r0.err === 'snap_start'
-                        ? 'No navigable water near the start in this view. Zoom or pan so the ocean is on screen.'
-                        : r0.err === 'snap_end'
-                          ? 'No navigable water near the end in this view. Zoom or pan so the ocean is on screen.'
-                          : 'No continuous sea between these stops in the region Mapbox loaded. Zoom out so the whole crossing fits, then compute route again.';
-                dash.style.display = 'block';
-                dash.innerHTML = `<div style="font-size: 10px; color: #888; margin: 10px 16px;">ROUTING ERROR</div>
-                                 <div style="color:#ff4444; padding: 0 16px 10px;">${hint}</div>`;
-                return;
-            }
-
-            currentResults = validResults;
-            drawMultipleRoutes(validResults);
-            const refPath = validResults[0].path;
-            const mid = refPath[Math.floor(refPath.length / 2)];
-            const launchOutlook = mid ? await fetchDepartureOutlook(mid[1], mid[0]) : null;
-            updateMultiDash(validResults, launchOutlook);
-
-            if (validResults.length > 0) {
-                selectRoute(validResults[0].mode.id);
-            }
-        } catch (err) {
-            console.error(err);
-        } finally {
-            loader.style.display = 'none';
-        }
-    })();
+    runRouteComputation();
 });
 
 function drawMultipleRoutes(validResults) {
@@ -1457,6 +1760,7 @@ function drawMultipleRoutes(validResults) {
 function selectRoute(modeId) {
     const selectedRes = currentResults.find(r => r.mode.id === modeId);
     if (!selectedRes) return;
+    selectedRouteModeId = modeId;
 
     // Update UI selection
     document.querySelectorAll('.route-item').forEach(el => {
@@ -1512,19 +1816,15 @@ function selectRoute(modeId) {
             el.className = 'hazard-marker';
             el.style.cssText = `width:18px;height:18px;background:white;border:2px solid ${selectedRes.mode.color};border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:10px;box-shadow: 0 1px 3px rgba(0,0,0,0.2);`;
             
-            let label = 'H';
             let detail = 'General Hazard';
             let innerHTML = `<div style="width:10px;height:10px;background:${selectedRes.mode.color};border-radius:2px;"></div>`;
             if (s.waveHeight > 2.5) {
-                label = 'W';
                 detail = `High Waves: ${s.waveHeight.toFixed(1)}m`;
                 innerHTML = `<div style="font-weight:bold;color:${selectedRes.mode.color};">W</div>`;
             } else if (s.windSpeed > 10) {
-                label = 'F';
                 detail = `Strong Wind: ${s.windSpeed.toFixed(1)} m/s`;
                 innerHTML = `<div style="font-weight:bold;color:${selectedRes.mode.color};">F</div>`;
             } else if (s.currentVel > 0.5) {
-                label = 'C';
                 detail = `Strong Current: ${s.currentVel.toFixed(1)} m/s`;
                 innerHTML = `<div style="font-weight:bold;color:${selectedRes.mode.color};">C</div>`;
             }
@@ -1557,6 +1857,83 @@ function selectRoute(modeId) {
         }, new mapboxgl.LngLatBounds(coordinates[0], coordinates[0]));
         map.fitBounds(bounds, { padding: 80, duration: 1000 });
     }
+
+    startRouteShipAnimation(selectedRes.path);
+    updateLegendTripSummary();
+}
+
+const LEGEND_TRIP_EMPTY_HTML = `<div class="trip-empty">
+        <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 17h18l-2-8H5l-2 8zM3 17l-1-3h20l-1 3"/><path d="M9 11V6a3 3 0 0 1 3-3v0a3 3 0 0 1 3 3v5"/>
+        </svg>
+        Compute a route to see distance, sea time, and ETA from your cruise speed and departure.
+      </div>`;
+
+function updateLegendTripSummary() {
+    const el = document.getElementById('legend-trip-summary');
+    if (!el) return;
+
+    const selectedRes = currentResults.find((r) => r.mode.id === selectedRouteModeId);
+    if (!selectedRes || selectedRes.path.length < 2) {
+        el.innerHTML = LEGEND_TRIP_EMPTY_HTML;
+        return;
+    }
+
+    const esc = (s) =>
+        String(s)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/"/g, '&quot;');
+
+    const roughNm = selectedRes.path.length * 25;
+    const speedKts = getCruiseSpeedKts();
+    const departure = getDepartureDate();
+    const hoursEnRoute = speedKts > 0 ? roughNm / speedKts : null;
+    const durLabel = formatSeaDurationHours(hoursEnRoute);
+    const etaLabel = departure && hoursEnRoute != null ? formatEtaLocal(departure, hoursEnRoute) : null;
+    const mode = selectedRes.mode;
+    const col = mode.color || '#38bdf8';
+
+    const nmDisplay = roughNm.toFixed(0);
+    const timeMain = esc(durLabel || '—');
+    const timeSubParts = [];
+    if (durLabel) timeSubParts.push(`${speedKts} kn cruise · rough nm index`);
+    if (etaLabel) timeSubParts.push(`ETA ${etaLabel}`);
+    if (!durLabel) timeSubParts.push('Set cruise speed in Voyage & vessel');
+    else if (!etaLabel) timeSubParts.push('Add departure time for ETA');
+    const timeSub = esc(timeSubParts.filter(Boolean).join(' · '));
+
+    el.innerHTML = `
+      <div class="trip-stats">
+        <div class="trip-route-pill" style="color:${col};border-color:${col}55">
+          <span class="trip-route-pill-dot" style="background:${col};color:${col}"></span>
+          ${esc(mode.label)}
+        </div>
+        <div class="trip-stat">
+          <div class="trip-stat-icon nm" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/>
+            </svg>
+          </div>
+          <div class="trip-stat-body">
+            <div class="trip-stat-label">Est. distance</div>
+            <div class="trip-stat-value">${nmDisplay}<span style="font-size:12px;font-weight:600;opacity:0.85;margin-left:4px">nm</span></div>
+            <div class="trip-stat-sub">Along selected track (grid proxy)</div>
+          </div>
+        </div>
+        <div class="trip-stat">
+          <div class="trip-stat-icon time" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>
+            </svg>
+          </div>
+          <div class="trip-stat-body">
+            <div class="trip-stat-label">Sea time &amp; ETA</div>
+            <div class="trip-stat-value" style="font-size:15px">${timeMain}</div>
+            <div class="trip-stat-sub">${timeSub}</div>
+          </div>
+        </div>
+      </div>`;
 }
 
 function updateMultiDash(validResults, launchOutlook = null) {
@@ -1578,16 +1955,35 @@ function updateMultiDash(validResults, launchOutlook = null) {
             <div style="padding: 0 16px 10px; font-size: 12px; color: #70757a; border-bottom: 1px solid #f1f3f4;">Hourly outlook unavailable (network or API).</div>`;
     }
 
+    const draftM = getDeclaredDraftM();
     const depthNote0 = validResults[0]?.stats?.depthNote;
-    if (depthNote0) {
+    if (depthNote0 || draftM != null) {
+        let depthBody = depthNote0 || '';
+        if (draftM != null) {
+            depthBody += (depthBody ? '<br/><br/>' : '') +
+                `<span style="color:#70757a;">Declared draft:</span> <b>${draftM.toFixed(1)} m</b> (reference only — not validated against soundings along the track).`;
+        }
         html += `<div style="font-size: 11px; color: #70757a; margin: 10px 16px 4px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px;">Depth awareness</div>
-            <div style="padding: 0 16px 10px; font-size: 11px; color: #4d5156; line-height: 1.45; border-bottom: 1px solid #f1f3f4;">${depthNote0}</div>`;
+            <div style="padding: 0 16px 10px; font-size: 11px; color: #4d5156; line-height: 1.45; border-bottom: 1px solid #f1f3f4;">${depthBody}</div>`;
     }
+
+    const speedKts = getCruiseSpeedKts();
+    const departure = getDepartureDate();
 
     html += `<div style="font-size: 11px; color: #70757a; margin: 10px 16px 4px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px;">Recommended Routes</div>`;
     validResults.forEach(r => {
         const roughNm = r.path.length * 25;
         const tier = safetyTier(r.stats.maxWave, r.stats.maxWindMs, r.stats.maxCur);
+        const hoursEnRoute = speedKts > 0 ? roughNm / speedKts : null;
+        const durLabel = formatSeaDurationHours(hoursEnRoute);
+        const etaLabel = departure && hoursEnRoute != null ? formatEtaLocal(departure, hoursEnRoute) : null;
+        let timeBlock = '';
+        if (durLabel) {
+            timeBlock = `<div style="font-size:11px;color:#5f6368;margin-top:6px;line-height:1.4;">
+                ${durLabel}${etaLabel ? ` • ETA <b style="color:#3c4043;">${etaLabel}</b>` : ''}
+                <span style="color:#9aa0a6;"> @ ${speedKts} kn (rough nm)</span>
+            </div>`;
+        }
         html += `
             <div class="route-item" data-mode="${r.mode.id}" onclick="window.selectRoute('${r.mode.id}')">
                 <div style="display: flex; align-items: baseline; gap: 8px;">
@@ -1598,29 +1994,125 @@ function updateMultiDash(validResults, launchOutlook = null) {
                     Risk: <span style="color:${tier.color}; font-weight: bold;">${tier.label}</span> • 
                     Max Wave: ${r.stats.maxWave.toFixed(1)}m
                 </div>
+                ${timeBlock}
             </div>
         `;
     });
     dash.innerHTML = html;
+    updateLegendTripSummary();
 }
 
 // Expose selectRoute to global scope for onclick handlers
 window.selectRoute = selectRoute;
 
+function setWaypointsFromCoords(coords) {
+    if (!Array.isArray(coords) || coords.length < 2) {
+        return { ok: false, error: 'Provide at least two [lng, lat] pairs.' };
+    }
+    clearRouteOverlays();
+    for (const p of coords) {
+        const lng = Number(p[0]);
+        const lat = Number(p[1]);
+        if (!Number.isFinite(lng) || !Number.isFinite(lat)) {
+            return { ok: false, error: 'Invalid coordinate in waypoints.' };
+        }
+        addRoutePoint(new mapboxgl.LngLat(lng, lat));
+    }
+    return { ok: true, count: routePoints.length };
+}
+
+function getRouteAssistantSnapshot() {
+    return {
+        waypoints: routePoints.map((p) => [p.lng, p.lat]),
+        waypointCount: routePoints.length,
+        routeVariants: currentResults.map((r) => {
+            const tier = safetyTier(r.stats?.maxWave, r.stats?.maxWindMs, r.stats?.maxCur);
+            return {
+                id: r.mode.id,
+                label: r.mode.label,
+                roughNm: r.path.length ? r.path.length * 25 : 0,
+                maxWaveM: r.stats?.maxWave,
+                maxWindMs: r.stats?.maxWindMs,
+                maxCurrentMs: r.stats?.maxCur,
+                riskTier: tier.label
+            };
+        }),
+        selectedVariantId: selectedRouteModeId,
+        mapCenter: [map.getCenter().lng, map.getCenter().lat],
+        mapZoom: map.getZoom(),
+        shallowWaterPenalty: isShallowPenaltyOn(),
+        bathymetryOverlay: true,
+        cruiseSpeedKts: getCruiseSpeedKts(),
+        declaredDraftM: getDeclaredDraftM(),
+        departureLocal: inputDeparture?.value || null
+    };
+}
+
+window.__oceanRouteAssistant = {
+    runRouteComputation,
+    setWaypointsFromCoords,
+    clearRouteOverlays,
+    undoLastPoint,
+    selectRoute,
+    getRouteAssistantSnapshot,
+    flyTo: (lng, lat, zoom) => {
+        const z = zoom != null ? Number(zoom) : map.getZoom();
+        if (!Number.isFinite(lng) || !Number.isFinite(lat)) return { ok: false, error: 'Invalid lng/lat.' };
+        map.flyTo({ center: [lng, lat], zoom: Number.isFinite(z) ? z : 2.4, essential: true });
+        return { ok: true };
+    },
+    setOceanOptions: (opts) => {
+        if (opts.shallowPenalty != null && toggleShallowPenalty) {
+            toggleShallowPenalty.checked = !!opts.shallowPenalty;
+        }
+        if (opts.bathymetry != null && opts.bathymetry === false) {
+            return { ok: false, error: 'Bathymetry overlay is always on in this app.' };
+        }
+        return { ok: true };
+    },
+    setVoyageParams: (opts) => {
+        if (opts.cruiseSpeedKts != null && inputCruiseSpeed) {
+            const s = Number(opts.cruiseSpeedKts);
+            if (Number.isFinite(s) && s > 0) inputCruiseSpeed.value = String(s);
+        }
+        if (opts.declaredDraftM != null && inputDraft) {
+            const d = Number(opts.declaredDraftM);
+            inputDraft.value = Number.isFinite(d) && d > 0 ? String(d) : '';
+        }
+        if (opts.departureISO != null && inputDeparture) {
+            const t = Date.parse(opts.departureISO);
+            if (!Number.isNaN(t)) {
+                const dt = new Date(t);
+                const pad = (n) => String(n).padStart(2, '0');
+                inputDeparture.value = `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
+            }
+        }
+        if (opts.shallowPenalty != null && toggleShallowPenalty) {
+            toggleShallowPenalty.checked = !!opts.shallowPenalty;
+        }
+        return { ok: true };
+    }
+};
+
 map.on('click', (e) => {
     if (e.originalEvent?.target?.closest?.('#route-toolbar')) return;
+    if (e.originalEvent?.target?.closest?.('#ai-assistant')) return;
+    if (e.originalEvent?.target?.closest?.('#voyage-params')) return;
     addRoutePoint(e.lngLat);
 });
 
 btnUndo.addEventListener('click', () => undoLastPoint());
 btnClear.addEventListener('click', () => clearRouteOverlays());
 
-function drawRoute(coords, stats) {
-    // Legacy function replaced by drawMultipleRoutes
-    drawMultipleRoutes([{ mode: { id: 'safety', color: '#dc2626' }, path: coords, stats }]);
+function refreshDashFromVoyageInputs() {
+    if (currentResults.length >= 1) {
+        updateMultiDash(currentResults, lastLaunchOutlook);
+    }
+}
+for (const el of [inputCruiseSpeed, inputDraft, inputDeparture]) {
+    if (!el) continue;
+    el.addEventListener('change', refreshDashFromVoyageInputs);
+    el.addEventListener('input', refreshDashFromVoyageInputs);
 }
 
-function updateDash(stats, path) {
-    // Legacy function replaced by updateMultiDash
-    updateMultiDash([{ mode: { id: 'safety', label: 'Safety-First', color: '#dc2626' }, path: path, stats }]);
-}
+initRouteAssistant();
